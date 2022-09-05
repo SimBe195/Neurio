@@ -22,6 +22,9 @@ class RewardWrapperV1(BasicRewardWrapper):
     def step(self, action: int) -> Tuple[np.array, float, bool, Dict[str, Any]]:
         state, reward, terminated, truncated, info = super().step(action)
 
+        time_penalty = -0.02
+
+        # Max speed is 3 per frame
         new_x_pos = info["x_pos"]
         x_diff = new_x_pos - self.curr_x_pos
         self.curr_x_pos = new_x_pos
@@ -30,14 +33,14 @@ class RewardWrapperV1(BasicRewardWrapper):
         score_diff = next_score - self.curr_score
         self.curr_score = next_score
 
-        reward = -0.1 + x_diff / 10 + score_diff / 200
+        reward = time_penalty + x_diff + score_diff / 40
 
         if terminated:
             if info["flag_get"]:
-                reward += 10.0
+                reward += 15.0
             else:
-                reward -= 10.0
+                reward -= 50.0
 
-        reward = np.clip(reward, -1.0, 1.0)
+        reward = np.clip(reward, -15.0, 15.0)
         
         return state, reward, terminated, truncated, info

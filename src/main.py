@@ -9,8 +9,8 @@ from game_loop import GameLoop
 
 if __name__ == "__main__":
     env = Environment()
-    env = SubsamplingWrapper(env, num_steps=4, new_width=84, new_height=84)
     env = RewardWrapperV1(env)
+    env = SubsamplingWrapper(env, num_steps=4, new_width=84, new_height=84)
     # agent = RandomAgent(environment=env, train_mode=True)
     agent = PPOAgent(environment=env, train_mode=True)
 
