@@ -10,7 +10,14 @@ from game_loop import GameLoop
 if __name__ == "__main__":
     env = Environment()
     env = RewardWrapperV1(env)
-    env = SubsamplingWrapper(env, num_steps=4, new_width=84, new_height=84)
+    env = SubsamplingWrapper(
+        env,
+        num_steps=4,
+        new_width=114,
+        new_height=94,
+        clip=(33, 19, 28, None),
+        greyscale=True,
+    )
     # agent = RandomAgent(environment=env, train_mode=True)
     agent = PPOAgent(environment=env, train_mode=True)
 
