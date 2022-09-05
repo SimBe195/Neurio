@@ -42,5 +42,6 @@ class RewardWrapperV1(BasicRewardWrapper):
                 reward -= 50.0
 
         reward = np.clip(reward, -15.0, 15.0)
+        reward /= 10
 
         return state, reward, terminated, truncated, info
