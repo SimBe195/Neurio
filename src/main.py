@@ -15,4 +15,8 @@ if __name__ == "__main__":
     agent = PPOAgent(environment=env, train_mode=True)
 
     loop = GameLoop(env, agent)
-    loop.run(True, 1_000_000, True)
+    for episode in range(1000):
+        steps, reward = loop.run_episode(min((episode // 50 + 1) * 100, 1000), True)
+        logging.info(
+            f" Episode {episode+1} finished after {steps} steps. Total reward: {reward}."
+        )
