@@ -117,7 +117,9 @@ class PPOAgent(Agent):
             num_batches = -(-num_steps // batch_size)
             losses = []
             for b in range(num_batches):
-                batch_indices = indices[b * batch_size : min(num_steps, (b + 1) * batch_size)]
+                batch_indices = indices[
+                    b * batch_size : min(num_steps, (b + 1) * batch_size)
+                ]
                 batch_states = tf.gather(states, batch_indices)
                 batch_old_log_probs = tf.gather(old_log_probs, batch_indices)
                 batch_actions = tf.gather(actions, batch_indices)
@@ -128,7 +130,9 @@ class PPOAgent(Agent):
                     logits, v = self.actor_critic(batch_states, training=True)
 
                     # Actor loss
-                    new_log_probs = tf.gather(tf.nn.log_softmax(logits), batch_actions, axis=-1)
+                    new_log_probs = tf.gather(
+                        tf.nn.log_softmax(logits), batch_actions, axis=-1
+                    )
                     ratio = tf.math.exp(new_log_probs - batch_old_log_probs)
                     act_loss_1 = batch_advantages * ratio
                     act_loss_2 = batch_advantages * tf.clip_by_value(
