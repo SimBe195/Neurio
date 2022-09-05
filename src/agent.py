@@ -45,7 +45,7 @@ class PPOAgent(Agent):
         self.clip_param = 0.2
 
         self.actor_critic = ActorCritic(num_actions=self.env.action_space.n)
-        self.opt = tf.keras.optimizers.Adam(learning_rate=3e-05)
+        self.opt = tf.keras.optimizers.Adam(learning_rate=1e-04)
 
         self.states = []
         self.actions = []
@@ -91,7 +91,7 @@ class PPOAgent(Agent):
         self.values.append(v)
 
         gae = 0
-        lmbd = 0.95
+        lmbd = 1.0
         advantage_buffer = []
         returns = []
 
@@ -104,14 +104,14 @@ class PPOAgent(Agent):
             returns.append(gae + value)
 
         advantages = np.array(advantage_buffer, dtype=np.float32)
-        advantages = (advantages - np.mean(advantages)) / (np.std(advantages) + 1e-10)
+        advantages = (advantages - np.mean(advantages)) / (np.std(advantages))
 
         states = np.stack(self.states, axis=0)
         actions = np.array(self.actions, dtype=np.int32)
         returns = np.array(returns, dtype=np.float32)
         old_log_probs = np.array(self.log_probs, dtype=np.float32)
 
-        for e in range(25):
+        for e in range(10):
             indices = tf.random.shuffle(tf.range(num_steps))
             batch_size = 32
             num_batches = -(-num_steps // batch_size)
@@ -150,7 +150,7 @@ class PPOAgent(Agent):
                     self.opt.apply_gradients(
                         zip(grads, self.actor_critic.trainable_variables)
                     )
-            logging.info(f" Epoch {e}. Average loss: {sum(losses) / len(losses)}")
+        logging.info(f" Updated Agent. Average loss: {sum(losses) / len(losses)}")
 
     def feed_state(self, state: np.array) -> None:
         self.states.append(state)
