@@ -45,7 +45,7 @@ class PPOAgent(Agent):
         self.clip_param = 0.2
 
         self.actor_critic = ActorCritic(num_actions=self.env.action_space.n)
-        self.opt = tf.keras.optimizers.Adam(learning_rate=1e-05)
+        self.opt = tf.keras.optimizers.Adam(learning_rate=3e-04)
 
         self.states = []
         self.actions = []
@@ -57,22 +57,28 @@ class PPOAgent(Agent):
     def next_action(self) -> int:
         if len(self.states) == 1:
             num_channels = tf.shape(self.states[-1])[-1]
-            state_hists = tf.pad(self.states[-1], [[0, 0], [0, 0], [0, 2 * num_channels]])
+            state_hists = tf.pad(
+                self.states[-1], [[0, 0], [0, 0], [0, 2 * num_channels]]
+            )
         elif len(self.states) == 2:
             num_channels = tf.shape(self.states[-1])[-1]
             state_hists = tf.concat([self.states[-1], self.states[-2]], axis=-1)
             state_hists = tf.pad(state_hists, [[0, 0], [0, 0], [0, num_channels]])
         else:
-            state_hists = tf.concat([self.states[-1], self.states[-2], self.states[-3]], axis=-1)
+            state_hists = tf.concat(
+                [self.states[-1], self.states[-2], self.states[-3]], axis=-1
+            )
         in_state = state_hists[None, ...]
-        logits, value = self.actor_critic(in_state, np.array(self.actions[-1])[None, ...], training=self.train_mode)
+        logits, value = self.actor_critic(
+            in_state, np.array(self.actions[-1])[None, ...], training=self.train_mode
+        )
         if self.train_mode:
             logging.debug(f"State value: {value}")
             self.values.append(value.numpy()[0, 0])
             action = tf.random.categorical(logits, 1)[0, 0]
             self.log_probs.append(tf.nn.log_softmax(logits)[0, action])
         else:
-            action = tf.argmax(logits, axis=1).numpy()
+            action = tf.argmax(logits, axis=-1).numpy()[0]
         self.actions.append(action)
         logging.debug(f"Action: {action}")
         return int(action)
@@ -97,9 +103,13 @@ class PPOAgent(Agent):
         if num_steps < 3:
             return
 
-        state_hist = tf.concat([self.states[-1], self.states[-2], self.states[-3]], axis=-1)
+        state_hist = tf.concat(
+            [self.states[-1], self.states[-2], self.states[-3]], axis=-1
+        )
 
-        _, v = self.actor_critic(state_hist[None, ...], np.array(self.actions[-1])[None, ...], training=True)
+        _, v = self.actor_critic(
+            state_hist[None, ...], np.array(self.actions[-1])[None, ...], training=True
+        )
         self.values.append(v)
 
         gae = 0
@@ -144,7 +154,9 @@ class PPOAgent(Agent):
                 batch_returns = tf.gather(returns, batch_indices)
 
                 with tf.GradientTape() as tape:
-                    logits, v = self.actor_critic(batch_state_hists, batch_prev_actions, training=True)
+                    logits, v = self.actor_critic(
+                        batch_state_hists, batch_prev_actions, training=True
+                    )
                     policy = tf.nn.softmax(logits)
 
                     # Actor loss
@@ -165,7 +177,11 @@ class PPOAgent(Agent):
                     crit_loss = tf.keras.losses.Huber()(batch_returns, v[:, 0])
 
                     # Entropy loss
-                    entropy = tf.reduce_mean(-tf.reduce_sum(policy * tf.math.log(tf.clip_by_value(policy, 1e-10, 1))))
+                    entropy = tf.reduce_mean(
+                        -tf.reduce_sum(
+                            policy * tf.math.log(tf.clip_by_value(policy, 1e-10, 1))
+                        )
+                    )
 
                     loss = act_loss + 0.5 * crit_loss - 0.01 * entropy
                     losses.append(loss)

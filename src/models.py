@@ -36,7 +36,7 @@ class ActorCritic(tf.keras.Model):
     def __init__(self, num_actions: int) -> None:
         super().__init__()
         self.num_actions = num_actions
- 
+
         self.encoder = ConvEncoder()
 
         self.actor = tf.keras.Sequential()
