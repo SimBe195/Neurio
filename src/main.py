@@ -1,3 +1,5 @@
+from datetime import datetime
+import tensorflow as tf
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -8,6 +10,11 @@ from game_loop import GameLoop
 
 
 if __name__ == "__main__":
+    train_log_dir = "logs/" + datetime.now().strftime("%Y-%m-%d_%H-%M") + "/train"
+    test_log_dir = "logs/" + datetime.now().strftime("%Y-%m-%d_%H-%M") + "/test"
+    train_summary_writer = tf.summary.create_file_writer(train_log_dir)
+    test_summary_writer = tf.summary.create_file_writer(test_log_dir)
+
     env = Environment()
     env = RewardWrapperV1(env)
     env = SubsamplingWrapper(
@@ -22,8 +29,24 @@ if __name__ == "__main__":
     agent = PPOAgent(environment=env, train_mode=True)
 
     loop = GameLoop(env, agent)
-    for episode in range(1000):
-        steps, reward = loop.run_episode(min((episode // 50 + 1) * 100, 1000), True)
+    episode = 0
+    for iter in range(1000):
+        for episode_iter in range(10):
+            episode += 1
+            agent.train_mode = True
+            steps, reward = loop.run_episode((iter + 1) * 10, False)
+            logging.info(
+                f" Train episode {episode+1} finished after {steps} steps. Total reward: {reward}."
+            )
+            with train_summary_writer.as_default():
+                tf.summary.scalar("steps", reward, episode)
+                tf.summary.scalar("reward", reward, episode)
+
+        agent.train_mode = False
+        steps, reward = loop.run_episode(None, True)
         logging.info(
-            f" Episode {episode+1} finished after {steps} steps. Total reward: {reward}."
+            f" Test episode {iter + 1} finished after {steps} steps. Total reward: {reward}."
         )
+        with test_summary_writer.as_default():
+            tf.summary.scalar("steps", reward, iter)
+            tf.summary.scalar("reward", reward, iter)
