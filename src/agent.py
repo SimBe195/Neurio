@@ -55,8 +55,17 @@ class PPOAgent(Agent):
         self.log_probs = []
 
     def next_action(self) -> int:
-        in_state = self.states[-1][None, ...]
-        logits, value = self.actor_critic(in_state, training=self.train_mode)
+        if len(self.states) == 1:
+            num_channels = tf.shape(self.states[-1])[-1]
+            state_hists = tf.pad(self.states[-1], [[0, 0], [0, 0], [0, 2 * num_channels]])
+        elif len(self.states) == 2:
+            num_channels = tf.shape(self.states[-1])[-1]
+            state_hists = tf.concat([self.states[-1], self.states[-2]], axis=-1)
+            state_hists = tf.pad(state_hists, [[0, 0], [0, 0], [0, num_channels]])
+        else:
+            state_hists = tf.concat([self.states[-1], self.states[-2], self.states[-3]], axis=-1)
+        in_state = state_hists[None, ...]
+        logits, value = self.actor_critic(in_state, np.array(self.actions[-1])[None, ...], training=self.train_mode)
         if self.train_mode:
             logging.debug(f"State value: {value}")
             self.values.append(value.numpy()[0, 0])
@@ -75,6 +84,7 @@ class PPOAgent(Agent):
     def reset(self) -> None:
         self.states.clear()
         self.actions.clear()
+        self.actions.append(0)
         self.values.clear()
         self.rewards.clear()
         self.dones.clear()
@@ -84,10 +94,12 @@ class PPOAgent(Agent):
         if not self.train_mode:
             return
         num_steps = len(self.states)
-        if num_steps == 0:
+        if num_steps < 3:
             return
 
-        _, v = self.actor_critic(self.states[-1][None, ...], training=True)
+        state_hist = tf.concat([self.states[-1], self.states[-2], self.states[-3]], axis=-1)
+
+        _, v = self.actor_critic(state_hist[None, ...], np.array(self.actions[-1])[None, ...], training=True)
         self.values.append(v)
 
         gae = 0
@@ -107,7 +119,11 @@ class PPOAgent(Agent):
         advantages = (advantages - np.mean(advantages)) / (np.std(advantages))
 
         states = np.stack(self.states, axis=0)
+        states_pad_1 = tf.pad(states, [[1, 0], [0, 0], [0, 0], [0, 0]])[:-1]
+        states_pad_2 = tf.pad(states, [[2, 0], [0, 0], [0, 0], [0, 0]])[:-2]
+        state_hists = tf.concat([states, states_pad_1, states_pad_2], axis=-1)
         actions = np.array(self.actions, dtype=np.int32)
+        prev_actions = tf.pad(actions, [[1, 0]])[:-1]
         returns = np.array(returns, dtype=np.float32)
         old_log_probs = np.array(self.log_probs, dtype=np.float32)
 
@@ -120,14 +136,15 @@ class PPOAgent(Agent):
                 batch_indices = indices[
                     b * batch_size : min(num_steps, (b + 1) * batch_size)
                 ]
-                batch_states = tf.gather(states, batch_indices)
+                batch_state_hists = tf.gather(state_hists, batch_indices)
                 batch_old_log_probs = tf.gather(old_log_probs, batch_indices)
                 batch_actions = tf.gather(actions, batch_indices)
+                batch_prev_actions = tf.gather(prev_actions, batch_indices)
                 batch_advantages = tf.gather(advantages, batch_indices)
                 batch_returns = tf.gather(returns, batch_indices)
 
                 with tf.GradientTape() as tape:
-                    logits, v = self.actor_critic(batch_states, training=True)
+                    logits, v = self.actor_critic(batch_state_hists, batch_prev_actions, training=True)
                     policy = tf.nn.softmax(logits)
 
                     # Actor loss
