@@ -45,7 +45,7 @@ class PPOAgent(Agent):
         self.clip_param = 0.2
 
         self.actor_critic = ActorCritic(num_actions=self.env.action_space.n)
-        self.opt = tf.keras.optimizers.Adam(learning_rate=1e-04)
+        self.opt = tf.keras.optimizers.Adam(learning_rate=1e-05)
 
         self.states = []
         self.actions = []
@@ -128,10 +128,11 @@ class PPOAgent(Agent):
 
                 with tf.GradientTape() as tape:
                     logits, v = self.actor_critic(batch_states, training=True)
+                    policy = tf.nn.softmax(logits)
 
                     # Actor loss
                     new_log_probs = tf.gather(
-                        tf.nn.log_softmax(logits), batch_actions, axis=-1
+                        tf.math.log(policy), batch_actions, axis=-1
                     )
                     ratio = tf.math.exp(new_log_probs - batch_old_log_probs)
                     act_loss_1 = batch_advantages * ratio
@@ -146,7 +147,10 @@ class PPOAgent(Agent):
                     # Critic loss
                     crit_loss = tf.keras.losses.Huber()(batch_returns, v[:, 0])
 
-                    loss = act_loss + 0.5 * crit_loss
+                    # Entropy loss
+                    entropy = tf.reduce_mean(-tf.reduce_sum(policy * tf.math.log(tf.clip_by_value(policy, 1e-10, 1))))
+
+                    loss = act_loss + 0.5 * crit_loss - 0.01 * entropy
                     losses.append(loss)
 
                     grads = tape.gradient(loss, self.actor_critic.trainable_variables)
