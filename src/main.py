@@ -16,7 +16,7 @@ if __name__ == "__main__":
         new_width=114,
         new_height=94,
         clip=(33, 19, 28, None),
-        greyscale=True,
+        greyscale=False,
     )
     # agent = RandomAgent(environment=env, train_mode=True)
     agent = PPOAgent(environment=env, train_mode=True)
