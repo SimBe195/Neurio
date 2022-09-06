@@ -4,7 +4,7 @@ from nes_py.wrappers import JoypadSpace
 from gym.spaces import Box
 from gym import Env, ObservationWrapper
 import gym_super_mario_bros
-from gym_super_mario_bros.actions import SIMPLE_MOVEMENT
+from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
 import cv2
 import pyglet
 
@@ -13,7 +13,7 @@ class Environment(JoypadSpace):
     def __init__(self) -> None:
         super().__init__(
             gym_super_mario_bros.make("SuperMarioBros-1-1-v0", new_step_api=True),
-            SIMPLE_MOVEMENT,
+            COMPLEX_MOVEMENT,
         )
 
 
