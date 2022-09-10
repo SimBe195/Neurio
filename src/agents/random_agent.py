@@ -13,4 +13,4 @@ class RandomAgent(Agent):
         return [
             np.random.randint(0, self.num_actions, dtype=np.int8)
             for _ in range(self.num_workers)
-        ]
+        ], [-np.log(self.num_actions)] * range(self.num_workers)

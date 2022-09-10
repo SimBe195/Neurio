@@ -49,18 +49,17 @@ class PPOAgent(Agent):
         in_states = self.experience_buffer.get_last_states()
         prev_actions = self.experience_buffer.get_last_actions()
         logits, values = self.actor_critic(in_states, prev_actions, training=train)
+        self.experience_buffer.buffer_values(values[:, 0].numpy())
         if train:
-            self.experience_buffer.buffer_values(values[:, 0].numpy())
             actions = tf.random.categorical(logits, 1, dtype=tf.int32)[:, 0].numpy()
-            self.experience_buffer.buffer_log_probs(
-                tf.gather(
-                    tf.nn.log_softmax(logits), actions, axis=-1, batch_dims=1
-                ).numpy()
-            )
         else:
             actions = tf.argmax(logits, axis=-1, output_type=tf.int32).numpy()
+        log_probs = tf.gather(
+            tf.nn.log_softmax(logits), actions, axis=-1, batch_dims=1
+        ).numpy()
+        self.experience_buffer.buffer_log_probs(log_probs)
         self.experience_buffer.buffer_actions(actions)
-        return actions.tolist()
+        return actions.tolist(), log_probs.tolist()
 
     def give_reward(self, reward: List[float], done: List[bool]) -> None:
         self.experience_buffer.buffer_rewards(reward)

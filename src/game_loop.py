@@ -43,18 +43,20 @@ class GameLoop:
 
         episode_rewards = [0] * self.agent.num_workers
         episode_steps = [0] * self.agent.num_workers
+        episode_probs = [[] for _ in range(self.agent.num_workers)]
         for _ in range(num_updates):
             for _ in range(steps_per_update):
                 self.agent.feed_observation(self.current_states)
-                actions = self.agent.next_actions(train)
+                actions, log_probs = self.agent.next_actions(train)
                 states, rewards, terminateds, truncateds, metrics = self.env.step(
                     actions
                 )
                 self.current_states = states
-                for w, (m, r) in enumerate(zip(metrics, rewards)):
-                    logging.debug(f"  Worker {w}, step {episode_steps[w]}: {m}")
+                for w, (m, r, log_p) in enumerate(zip(metrics, rewards, log_probs)):
+                    logging.debug(f"Worker {w}, step {episode_steps[w]}: {m}")
                     episode_steps[w] += 1
                     episode_rewards[w] += r
+                    episode_probs[w].append(np.exp(log_p))
 
                 dones = np.logical_or(terminateds, truncateds)
 
@@ -71,8 +73,12 @@ class GameLoop:
                         self.summary.log_episode_stat(episode_steps[w], "steps")
                         self.summary.log_episode_stat(episode_rewards[w], "reward")
                         self.summary.log_episode_stat(metrics[w]["x_pos"], "distance")
+                        self.summary.log_episode_stat(
+                            np.mean(episode_probs[w]), "confidence"
+                        )
                         episode_steps[w] = 0
                         episode_rewards[w] = 0
+                        episode_probs[w] = []
                         self.summary.next_episode()
                         if not train:
                             break
