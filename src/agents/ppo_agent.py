@@ -1,4 +1,5 @@
 import logging
+from typing import List
 
 import numpy as np
 import tensorflow as tf
@@ -29,7 +30,9 @@ class PPOAgent(Agent):
         self.entropy_loss_weight = config.entropy_loss_weight
         self.grad_clip_norm = config.grad_clip_norm
 
-        self.experience_buffer = ExperienceBuffer(config.num_input_frames)
+        self.experience_buffer = ExperienceBuffer(
+            self.num_workers, config.num_input_frames
+        )
 
         self.actor_critic = ActorCritic(
             config=config.model,
@@ -42,32 +45,35 @@ class PPOAgent(Agent):
             epsilon=config.optimizer_epsilon,
         )
 
-    def next_action(self, train: bool = True) -> int:
-        in_state = self.experience_buffer.get_last_state()
-        prev_action = self.experience_buffer.get_last_action()
-        logits, value = self.actor_critic(in_state, prev_action, training=train)
+    def next_actions(self, train: bool = True) -> List[int]:
+        in_states = self.experience_buffer.get_last_states()
+        prev_actions = self.experience_buffer.get_last_actions()
+        logits, values = self.actor_critic(in_states, prev_actions, training=train)
         if train:
-            self.experience_buffer.buffer_value(value[0, 0])
-            action = tf.random.categorical(logits, 1, dtype=tf.int32)[0, 0]
-            self.experience_buffer.buffer_log_prob(tf.nn.log_softmax(logits)[0, action])
+            self.experience_buffer.buffer_values(values[:, 0].numpy())
+            actions = tf.random.categorical(logits, 1, dtype=tf.int32)[:, 0].numpy()
+            self.experience_buffer.buffer_log_probs(
+                tf.gather(
+                    tf.nn.log_softmax(logits), actions, axis=-1, batch_dims=1
+                ).numpy()
+            )
         else:
-            action = tf.argmax(logits, axis=-1, output_type=tf.int32)[0]
-        self.experience_buffer.buffer_action(action)
-        return int(action)
+            actions = tf.argmax(logits, axis=-1, output_type=tf.int32).numpy()
+        self.experience_buffer.buffer_actions(actions)
+        return actions.tolist()
 
-    def give_reward(self, reward: float, done: bool) -> None:
-        self.experience_buffer.buffer_reward(reward)
-        self.experience_buffer.buffer_done(done)
+    def give_reward(self, reward: List[float], done: List[bool]) -> None:
+        self.experience_buffer.buffer_rewards(reward)
+        self.experience_buffer.buffer_dones(done)
 
     def reset(self) -> None:
         self.experience_buffer.reset()
 
     def update(self) -> None:
-        state = self.experience_buffer.get_last_state()
-        action = self.experience_buffer.get_last_action()
-
+        state = self.experience_buffer.get_last_states()
+        action = self.experience_buffer.get_last_actions()
         _, v = self.actor_critic(state, action, training=True)
-        self.experience_buffer.buffer_value(v[0, 0])
+        self.experience_buffer.buffer_values(v[:, 0].numpy())
 
         advantages, returns = gae_advantage_estimate(
             self.experience_buffer.get_reward_buffer(),
@@ -81,6 +87,13 @@ class PPOAgent(Agent):
         actions = self.experience_buffer.get_action_buffer()
         prev_actions = self.experience_buffer.get_prev_action_buffer()
         log_probs = self.experience_buffer.get_log_prob_buffer()
+
+        advantages = tf.reshape(advantages, (-1,))
+        returns = tf.reshape(returns, (-1,))
+        states = tf.reshape(states, (-1, *(states.shape[2:])))
+        actions = tf.reshape(actions, (-1,))
+        prev_actions = tf.reshape(prev_actions, (-1,))
+        log_probs = tf.reshape(log_probs, (-1,))
 
         num_steps = states.shape[0]
         losses = {"actor": 0, "critic": 0, "entropy": 0, "total": 0}
@@ -153,4 +166,4 @@ class PPOAgent(Agent):
         self.experience_buffer.reset()
 
     def feed_observation(self, state: np.array) -> None:
-        self.experience_buffer.buffer_state(state)
+        self.experience_buffer.buffer_states(state)

@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Tuple
+from typing import List, Tuple
 
 import numpy as np
 from omegaconf import DictConfig
@@ -11,10 +11,12 @@ class Agent(ABC):
     def __init__(
         self,
         config: DictConfig,
+        num_workers: int,
         observation_shape: Tuple[int, ...],
         num_actions: int,
         summary: Summary,
     ) -> None:
+        self.num_workers = num_workers
         self.observation_shape = observation_shape
         self.num_actions = num_actions
         self.summary = summary
@@ -28,7 +30,7 @@ class Agent(ABC):
         pass
 
     @abstractmethod
-    def next_action(self, train: bool = True) -> int:
+    def next_actions(self, train: bool = True) -> List[int]:
         pass
 
     @abstractmethod

@@ -2,64 +2,79 @@ import numpy as np
 
 
 class ExperienceBuffer:
-    def __init__(self, stack_frames: int) -> None:
+    def __init__(self, num_workers: int, stack_frames: int) -> None:
         self.states = []
         self.actions = []
-        self.prev_actions = [np.zeros(shape=(), dtype=np.int32)]
+        self.prev_actions = [np.zeros(shape=(num_workers,), dtype=np.int32)]
         self.values = []
         self.rewards = []
         self.dones = []
         self.log_probs = []
 
         self.stack_frames = stack_frames
+        self.num_workers = num_workers
 
-    def buffer_state(self, state: np.array) -> None:
-        if not len(self.states) or self.dones[-1] == 1:
-            # No history available for state, instead duplicate it
-            self.states.append(np.concatenate([state] * self.stack_frames, axis=-1))
+    def buffer_states(self, states: np.array) -> None:
+        # State shape: (workers, width, height, channels)
+        # Buffer shape: [(workers, width, height, stack_frames*channels), ...]
+
+        if not len(self.states):
+            # No history available for any state (post reset), instead duplicate it
+            self.states.append(
+                np.stack(
+                    [np.concatenate([s] * self.stack_frames, axis=-1) for s in states],
+                    axis=0,
+                )
+            )
         else:
-            last_stack = self.states[-1]
-            last_stack_trimmed = last_stack[..., state.shape[-1] :]
-            new_stack = np.concatenate([last_stack_trimmed, state], axis=-1)
-            self.states.append(new_stack)
+            state_incl_hist = []
+            for prev_done, prev_s, s in zip(self.dones[-1], self.states[-1], states):
+                if prev_done == 1:
+                    state_incl_hist.append(
+                        np.concatenate([s] * self.stack_frames, axis=-1)
+                    )
+                else:
+                    prev_s_trimmed = prev_s[..., s.shape[-1] :]
+                    state_incl_hist.append(np.concatenate([prev_s_trimmed, s], axis=-1))
 
-    def buffer_action(self, action: int) -> None:
-        np_action = np.array(action, dtype=np.int32)
-        self.prev_actions.append(np_action)
-        self.actions.append(np_action)
+            new_states = np.stack(state_incl_hist, axis=0)
+            self.states.append(new_states)
 
-    def buffer_value(self, value: float) -> None:
-        self.values.append(np.array(value, dtype=np.float32))
+    def buffer_actions(self, actions: np.array) -> None:
+        self.prev_actions.append(actions)
+        self.actions.append(actions)
 
-    def buffer_log_prob(self, log_prob: float) -> None:
-        self.log_probs.append(np.array(log_prob, dtype=np.float32))
+    def buffer_values(self, values: np.array) -> None:
+        self.values.append(values)
 
-    def buffer_reward(self, reward: float) -> None:
-        self.rewards.append(np.array(reward, dtype=np.float32))
+    def buffer_log_probs(self, log_probs: np.array) -> None:
+        self.log_probs.append(log_probs)
 
-    def buffer_done(self, done: bool) -> None:
-        self.dones.append(np.array(done, dtype=np.float32))
+    def buffer_rewards(self, rewards: np.array) -> None:
+        self.rewards.append(rewards)
+
+    def buffer_dones(self, dones: np.array) -> None:
+        for w in range(self.num_workers):
+            if dones[w] == 1:
+                self.prev_actions[-1][w] = 0
+        self.dones.append(dones)
 
     def reset(self) -> None:
-        if len(self.states) and self.dones[-1] == 0:
+        if len(self.states):
             # keep last state to build the next histories
             self.states = self.states[-1:]
             self.prev_actions = self.prev_actions[-1:]
             self.dones = self.dones[-1:]
-        else:
-            self.states = []
-            self.prev_actions = [np.zeros(shape=(), dtype=np.int32)]
-            self.dones = []
         self.actions = []
         self.values = []
         self.rewards = []
         self.log_probs = []
 
-    def get_last_state(self) -> np.array:
-        return np.array(self.states[-1:])
+    def get_last_states(self) -> np.array:
+        return self.states[-1]
 
-    def get_last_action(self) -> np.array:
-        return self.prev_actions[-1][None, ...]
+    def get_last_actions(self) -> np.array:
+        return self.prev_actions[-1]
 
     def get_state_buffer(self) -> np.array:
         if len(self.states) > len(self.actions):

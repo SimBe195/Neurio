@@ -30,8 +30,10 @@ def gae_advantage_estimate(
         returns.insert(0, gae + value)
         advantages.insert(0, gae)
 
-    returns = np.array(returns, dtype=np.float32)
-    advantages = np.array(advantages, dtype=np.float32)
-    advantages = (advantages - np.mean(advantages)) / (np.std(advantages) + 1e-10)
+    returns = np.stack(returns, axis=0).astype(np.float32)
+    advantages = np.stack(advantages, axis=0).astype(np.float32)
+    advantages = (advantages - np.mean(advantages, axis=0)[None, ...]) / (
+        np.std(advantages, axis=0)[None, ...] + 1e-10
+    )
 
     return advantages, returns

@@ -1,4 +1,6 @@
-from typing import Any, Dict, Tuple
+import multiprocessing as mp
+from multiprocessing.connection import Connection
+from typing import Any, Dict, List, Tuple
 
 import cv2
 import gym_super_mario_bros
@@ -117,8 +119,90 @@ class SubsamplingWrapper(ObservationWrapper):
         return super().render(*args, **kwargs)
 
 
+def _worker(remote: Connection, parent_remote: Connection, env: Env) -> None:
+    parent_remote.close()
+    while True:
+        try:
+            cmd, data = remote.recv()
+            if cmd == "step":
+                observation, reward, terminated, truncated, info = env.step(data)
+                if terminated or truncated:
+                    observation = env.reset()
+                remote.send((observation, reward, terminated, truncated, info))
+            elif cmd == "reset":
+                observation = env.reset()
+                remote.send(observation)
+            elif cmd == "render":
+                env.render()
+            elif cmd == "close":
+                remote.close()
+            else:
+                raise NotImplementedError
+        except EOFError:
+            break
+
+
 def get_environment(config: DictConfig) -> BaseEnvironment:
     env = BaseEnvironment(config)
     env = CustomRewardWrapper(config.reward, env)
     env = SubsamplingWrapper(config, env)
     return env
+
+
+class MultiprocessEnvironment:
+    def __init__(self, num_environments: int, config: DictConfig) -> None:
+        assert num_environments >= 1
+        self._closed = False
+        self._remotes, self._work_remotes = zip(
+            *[mp.Pipe() for _ in range(num_environments)]
+        )
+        self._processes = []
+
+        for work_remote, remote in zip(self._work_remotes, self._remotes):
+            env = get_environment(config)
+            args = (work_remote, remote, env)
+            process = mp.Process(target=_worker, args=args, daemon=True)
+            process.start()
+            self._processes.append(process)
+            work_remote.close()
+            self.action_space = env.action_space
+            self.observation_space = env.observation_space
+
+    def step(
+        self, actions: List[int]
+    ) -> Tuple[np.array, np.array, np.array, np.array, Dict[str, Any]]:
+        for remote, action in zip(self._remotes, actions):
+            remote.send(("step", int(action)))
+
+        observations, rewards, terminateds, truncateds, infos = zip(
+            *[remote.recv() for remote in self._remotes]
+        )
+        return (
+            np.stack(observations, axis=0),
+            np.stack(rewards, axis=0),
+            np.stack(terminateds, axis=0),
+            np.stack(truncateds, axis=0),
+            np.stack(infos, axis=0),
+        )
+
+    def render(self) -> None:
+        for remote in self._remotes:
+            remote.send(("render", None))
+
+    def reset(self) -> np.array:
+        for remote in self._remotes:
+            remote.send(("reset", None))
+        obs = [remote.recv() for remote in self._remotes]
+        return np.stack(obs, axis=0)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+
+        for remote in self._remotes:
+            remote.send(("close", None))
+
+        for process in self._processes:
+            process.join()
+
+        self._closed = True
