@@ -1,68 +1,54 @@
-from typing import Any, Dict, Optional, Tuple
-import numpy as np
-from nes_py.wrappers import JoypadSpace
-from gym.spaces import Box
-from gym import Env, ObservationWrapper
-import gym_super_mario_bros
-from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
+from typing import Any, Dict, Tuple
+
 import cv2
+import gym_super_mario_bros
+import numpy as np
 import pyglet
+from gym.core import Env, ObservationWrapper
+from gym.spaces import Box
+from gym_super_mario_bros.actions import COMPLEX_MOVEMENT, SIMPLE_MOVEMENT
+from nes_py.wrappers import JoypadSpace
+from omegaconf import DictConfig
+
+from src.reward_func import CustomRewardWrapper
 
 
-class Environment(JoypadSpace):
-    def __init__(self) -> None:
+class BaseEnvironment(JoypadSpace):
+    def __init__(self, config: DictConfig) -> None:
         super().__init__(
-            gym_super_mario_bros.make("SuperMarioBros-1-1-v0", new_step_api=True),
-            COMPLEX_MOVEMENT,
+            gym_super_mario_bros.make(config.env_name, new_step_api=True),
+            COMPLEX_MOVEMENT if config.complex_movement else SIMPLE_MOVEMENT,
         )
 
 
 class SubsamplingWrapper(ObservationWrapper):
-    def __init__(
-        self,
-        env: Env,
-        num_steps: int,
-        render_nn_input: bool = False,
-        new_width: Optional[int] = None,
-        new_height: Optional[int] = None,
-        clip: Tuple[Optional[int], ...] = (None, None, None, None),
-        greyscale: bool = True,
-        **kwargs
-    ) -> None:
+    def __init__(self, config: DictConfig, env: Env, **kwargs) -> None:
         super().__init__(env, **kwargs)
-        self.num_steps = num_steps
-        self.greyscale = greyscale
+        self.num_frames = config.num_frames
+        self.greyscale = config.greyscale
 
-        self.render_nn_input = render_nn_input
-        self.current_frame = None
+        self.render_nn_input = config.render_nn_input
 
-        self.new_width = new_width
-        self.new_height = new_height
+        self.reduce_factor = config.reduce_factor
 
-        self.clip_top, self.clip_bot, self.clip_left, self.clip_right = clip
-        if not self.new_width:
-            self.new_width = 256
-            if self.clip_left:
-                self.new_width -= self.clip_left
-            if self.clip_right:
-                self.new_width -= self.clip_right
+        self.clip_top = config.clip_top
+        self.clip_bot = config.clip_bot
+        self.clip_left = config.clip_left
+        self.clip_right = config.clip_right
 
-        if not self.new_height:
-            self.new_height = 240
-            if self.clip_top:
-                self.new_height -= self.clip_top
-            if self.clip_bot:
-                self.new_height -= self.clip_bot
+        self.new_width = (256 - self.clip_left - self.clip_right) // self.reduce_factor
+        self.new_height = (240 - self.clip_top - self.clip_bot) // self.reduce_factor
 
         self.observation_space = Box(
-            low=0.0,
-            high=1.0,
+            low=0,
+            high=255,
             shape=(
                 self.new_height,
                 self.new_width,
-                (1 if greyscale else 3),
+                (1 if self.greyscale else 3),
             ),
         )
+        self.current_frame = np.zeros(self.observation_space.shape, dtype=np.float32)
 
         if self.render_nn_input:
             self._window = pyglet.window.Window(
@@ -75,26 +61,21 @@ class SubsamplingWrapper(ObservationWrapper):
 
     def to_rgb_frame(self, state: np.array) -> np.array:
         if self.greyscale:
+            # duplicate value to R, G and B channel
             state = np.stack([state, state, state], axis=-1)
-        return (state * 255).astype(np.int8)
+        return state.astype(np.int8)
 
     def step(self, action: int) -> Tuple[np.array, float, bool, Dict[str, Any]]:
         total_reward = 0
-        total_terminated = False
-        total_truncated = False
-        max_state = np.zeros(self.observation_space.shape, dtype=np.float32)
-        for _ in range(self.num_steps):
+        for _ in range(self.num_frames):
             state, reward, terminated, truncated, metrics = super().step(action)
             total_reward += reward
-            total_terminated = total_terminated or terminated
-            total_truncated = total_truncated or truncated
-            max_state = np.maximum(max_state, state)
-            if total_terminated or total_truncated:
+            if terminated or truncated:
                 break
 
         if self.render_nn_input:
             self.current_frame = self.to_rgb_frame(state)
-        return max_state, total_reward, total_terminated, total_truncated, metrics
+        return state, total_reward, terminated, truncated, metrics
 
     def reset(self) -> np.array:
         state = super().reset()
@@ -112,7 +93,7 @@ class SubsamplingWrapper(ObservationWrapper):
             result = cv2.resize(result, (self.new_width, self.new_height))
             if self.greyscale:
                 result = cv2.cvtColor(result, cv2.COLOR_RGB2GRAY)[..., None]
-            result = result / 255
+            result = result.astype(np.float32)
         else:
             result = np.zeros(self.observation_space.shape, dtype=np.float32)
         return result
@@ -134,3 +115,10 @@ class SubsamplingWrapper(ObservationWrapper):
             self._window.flip()
 
         return super().render(*args, **kwargs)
+
+
+def get_environment(config: DictConfig) -> BaseEnvironment:
+    env = BaseEnvironment(config)
+    env = CustomRewardWrapper(config.reward, env)
+    env = SubsamplingWrapper(config, env)
+    return env

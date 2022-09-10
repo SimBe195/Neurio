@@ -1,0 +1,8 @@
+defaults:
+  - agent: ppo
+  - environment: subsampled
+  - _self_
+
+experiment_name: Baseline
+num_updates: 1_000
+steps_per_update: 512

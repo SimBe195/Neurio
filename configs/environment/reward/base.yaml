@@ -1,0 +1,5 @@
+tick_penalty: 1
+speed_reward_weight: 1
+score_reward_weight: 0.025
+death_penalty: 50
+level_finish_reward: 50

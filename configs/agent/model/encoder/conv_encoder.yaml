@@ -1,0 +1,6 @@
+num_conv_layers: 3
+num_filters: 32
+kernel_size: 3
+stride: 2
+num_linear_layers: 1
+linear_layer_size: 512
