@@ -1,6 +1,8 @@
 import logging
+from datetime import datetime
 
 import hydra
+from hydra.utils import get_original_cwd
 
 logging.basicConfig(level=logging.INFO)
 
@@ -15,7 +17,8 @@ from src.summary import Summary
 @hydra.main(version_base="1.2", config_path="configs", config_name="config")
 def main(config: DictConfig) -> None:
 
-    summary = Summary(config.experiment_name)
+    base_name = f"{config.experiment_name}_{datetime.now():%Y-%m-%d_%H:%M}"
+    summary = Summary(base_name)
 
     env = MultiprocessEnvironment(config.num_workers, config.environment)
     agent = get_agent(
@@ -26,7 +29,14 @@ def main(config: DictConfig) -> None:
         summary,
     )
 
-    GameLoop(config, env, agent, summary).run(render=True, train=True)
+    checkpoint_path = f"{get_original_cwd()}/models/{base_name}/checkpoint."
+    if config.load_step > 0:
+        agent.load(checkpoint_path + config.load_step)
+
+    GameLoop(config, env, agent, summary, config.save_interval, checkpoint_path).run(
+        render=False,
+        train=True,
+    )
 
 
 if __name__ == "__main__":

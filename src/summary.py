@@ -9,9 +9,7 @@ from hydra.utils import get_original_cwd
 
 class Summary:
     def __init__(self, exp_name) -> None:
-        log_dir = (
-            f"{get_original_cwd()}/logs/{exp_name}_{datetime.now():%Y-%m-%d_%H:%M}"
-        )
+        log_dir = f"{get_original_cwd()}/logs/{exp_name}"
         self.file_writer = tf.summary.create_file_writer(log_dir)
 
         self.episode_histories = {}

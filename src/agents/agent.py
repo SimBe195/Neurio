@@ -21,11 +21,15 @@ class Agent(ABC):
         self.num_actions = num_actions
         self.summary = summary
 
-    @abstractmethod
+    def save(self, path: str) -> None:
+        pass
+
+    def load(self, path: str) -> None:
+        pass
+
     def feed_observation(self, state: np.array) -> None:
         pass
 
-    @abstractmethod
     def update(self) -> None:
         pass
 
@@ -33,10 +37,8 @@ class Agent(ABC):
     def next_actions(self, train: bool = True) -> List[int]:
         pass
 
-    @abstractmethod
     def reset(self) -> None:
         pass
 
-    @abstractmethod
     def give_reward(self, reward: float, done: bool = False) -> None:
         pass

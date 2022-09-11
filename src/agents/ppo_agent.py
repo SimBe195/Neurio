@@ -68,6 +68,12 @@ class PPOAgent(Agent):
     def reset(self) -> None:
         self.experience_buffer.reset()
 
+    def save(self, path: str) -> None:
+        self.actor_critic.save_weights(path)
+
+    def load(self, path: str) -> None:
+        self.actor_critic.load_weights(path)
+
     def update(self) -> None:
         state = self.experience_buffer.get_last_states()
         action = self.experience_buffer.get_last_actions()

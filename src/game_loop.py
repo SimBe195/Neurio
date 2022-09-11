@@ -15,6 +15,8 @@ class GameLoop:
         environment: BaseEnvironment,
         agent: Agent,
         summary: Summary,
+        save_interval: int,
+        save_path: str,
     ) -> None:
         self.env = environment
         self.agent = agent
@@ -23,6 +25,9 @@ class GameLoop:
         self.num_updates = config.num_updates
         self.steps_per_update = config.steps_per_update
         self.current_states = [None] * self.agent.num_workers
+
+        self.save_interval = save_interval
+        self.save_path = save_path
 
     def reset(self) -> None:
         self.current_states = self.env.reset()
@@ -44,7 +49,7 @@ class GameLoop:
         episode_rewards = [0] * self.agent.num_workers
         episode_steps = [0] * self.agent.num_workers
         episode_probs = [[] for _ in range(self.agent.num_workers)]
-        for _ in range(num_updates):
+        for u in range(num_updates):
             for _ in range(steps_per_update):
                 self.agent.feed_observation(self.current_states)
                 actions, log_probs = self.agent.next_actions(train)
@@ -84,3 +89,5 @@ class GameLoop:
                             break
             if train:
                 self.agent.update()
+                if u % self.save_interval == 0:
+                    self.agent.save(self.save_path + f"{u:05d}")
