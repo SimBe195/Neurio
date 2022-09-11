@@ -42,8 +42,8 @@ class SubsamplingWrapper(ObservationWrapper):
         self.new_height = (240 - self.clip_top - self.clip_bot) // self.reduce_factor
 
         self.observation_space = Box(
-            low=0,
-            high=255,
+            low=0.0,
+            high=1.0,
             shape=(
                 self.new_height,
                 self.new_width,
@@ -62,6 +62,7 @@ class SubsamplingWrapper(ObservationWrapper):
             )
 
     def to_rgb_frame(self, state: np.array) -> np.array:
+        state = (state * 255).astype(np.int8)
         if self.greyscale:
             # duplicate value to R, G and B channel
             state = np.stack([state, state, state], axis=-1)
@@ -95,6 +96,7 @@ class SubsamplingWrapper(ObservationWrapper):
             result = cv2.resize(result, (self.new_width, self.new_height))
             if self.greyscale:
                 result = cv2.cvtColor(result, cv2.COLOR_RGB2GRAY)[..., None]
+            result = result / 255.0
             result = result.astype(np.float32)
         else:
             result = np.zeros(self.observation_space.shape, dtype=np.float32)

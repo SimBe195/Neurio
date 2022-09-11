@@ -10,7 +10,6 @@ class ConvEncoder(tf.keras.Sequential):
         initializer = tf.keras.initializers.Orthogonal(
             gain=1.41421356
         )  # gain for RELU activation
-        self.add(tf.keras.layers.Rescaling(1 / -127.5, offset=-1))
         for _ in range(config.num_conv_layers):
             self.add(
                 tf.keras.layers.Conv2D(
