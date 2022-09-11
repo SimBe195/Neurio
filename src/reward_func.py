@@ -30,6 +30,9 @@ class CustomRewardWrapper(RewardWrapper):
         # Max speed is 3 per frame
         new_x_pos = info["x_pos"]
         x_diff = new_x_pos - self.curr_x_pos
+        if abs(x_diff) > 20:
+            # Not normal movement, this is a teleport of some sort
+            x_diff = 0
         self.curr_x_pos = new_x_pos
 
         next_score = info["score"]
