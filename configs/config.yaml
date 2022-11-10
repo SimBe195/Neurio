@@ -5,7 +5,6 @@ defaults:
   - _self_
 
 agent:
-  clip_value: False
   learning_rate:
     config:
       initial_learning_rate: 4e-04
@@ -13,7 +12,7 @@ agent:
     num_actor_layers: 1
     num_critic_layers: 1
 
-experiment_name: "lr_${agent.learning_rate.config.initial_learning_rate}_${num_workers}-workers_conv-${agent.model.encoder.num_conv_layers}x${agent.model.encoder.num_filters}-${agent.model.encoder.kernel_size}-${agent.model.encoder.stride}_lin-${agent.model.encoder.num_linear_layers}x${agent.model.encoder.linear_layer_size}_com-${agent.model.num_common_layers}x${agent.model.common_layer_size}_actval-${agent.model.num_actor_layers}x${agent.model.actor_layer_size}"
-num_workers: 32
+experiment_name: "lr_${agent.learning_rate.config.initial_learning_rate}_${num_workers}-workers_conv-${agent.model.encoder.num_conv_layers}x${agent.model.encoder.num_filters}-${agent.model.encoder.kernel_size}-${agent.model.encoder.stride}_com-${agent.model.num_common_layers}x${agent.model.common_layer_size}_actval-${agent.model.num_actor_layers}x${agent.model.actor_layer_size}"
+num_workers: 16
 num_updates_per_level: 100
 steps_per_update: 128
