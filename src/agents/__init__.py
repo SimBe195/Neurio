@@ -1,4 +1,3 @@
-import numpy as np
 from omegaconf import DictConfig
 
 from .agent import Agent
