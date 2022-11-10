@@ -1,0 +1,6 @@
+class_name: PolynomialDecay
+config:
+  initial_learning_rate: 4e-04
+  end_learning_rate: 4e-04
+  decay_steps: 1
+  power: 1.0
