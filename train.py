@@ -1,16 +1,15 @@
 import logging
-from datetime import datetime
 
 import hydra
-from hydra.utils import get_original_cwd
 
-from src.level_schedule import get_level_schedule
+from src.level_schedule import get_linear_level_schedule
 
 logging.basicConfig(level=logging.ERROR)
 
 from omegaconf import DictConfig
 
 from src.agents import get_agent
+from src.checkpoints import CheckpointHandler
 from src.environment import (
     get_multiprocess_environment,
     get_num_actions,
@@ -23,8 +22,7 @@ from src.summary import Summary
 @hydra.main(version_base="1.2", config_path="configs", config_name="config")
 def main(config: DictConfig) -> None:
 
-    base_name = f"{datetime.now():%Y-%m-%d_%H:%M}_{config.experiment_name}"
-    summary = Summary(base_name)
+    summary = Summary(config.experiment_name)
 
     agent = get_agent(
         config.agent,
@@ -33,17 +31,15 @@ def main(config: DictConfig) -> None:
         summary,
     )
 
-    save_checkpoint_path = f"{get_original_cwd()}/models/{base_name}/checkpoint."
-    if config.load_name:
-        load_checkpoint_path = f"{get_original_cwd()}/models/{config.load_name}/checkpoint.{config.load_iter:03d}"
-        logging.info(f"Loading model weights from {load_checkpoint_path}")
-        agent.load(load_checkpoint_path)
+    for level in get_linear_level_schedule():
+        checkpoint_handler = CheckpointHandler(config.experiment_name, level)
+        start_epoch = 0
+        if checkpoint_handler.checkpoints_exist():
+            start_epoch = checkpoint_handler.find_max_saved_epoch() + 1
+            agent.load(checkpoint_handler.get_save_path(start_epoch - 1))
 
-    for iter, level in enumerate(
-        get_level_schedule()[config.load_iter :], start=config.load_iter
-    ):
         agent.set_num_workers(config.num_workers)
-        logging.info(f"Train on level {level}")
+        logging.info(f"Train on level {level}, starting at epoch {start_epoch}")
         env = get_multiprocess_environment(
             config.num_workers,
             config=config.environment,
@@ -55,35 +51,20 @@ def main(config: DictConfig) -> None:
             train=True,
         )
         env.close()
-        agent.save(save_checkpoint_path + f"{iter:03d}")
+
+        agent.save(checkpoint_handler.get_save_path(start_epoch))
 
         agent.set_num_workers(1)
-        if level:
-            logging.info(f"Eval on level {level}")
-            env = get_singleprocess_environment(
-                config=config.environment,
-                level=level,
-                recording_path=f"recordings/{base_name}/",
-                video_prefix=f"iter-{iter+1}_lev-{level}",
-            )
 
-            GameLoop(config, env, agent, None).run(
-                render=False,
-                train=False,
-            )
-
-        logging.info(f"Eval whole game")
+        logging.info(f"Eval on level {level}")
         env = get_singleprocess_environment(
             config=config.environment,
-            recording_path=f"recordings/{base_name}/",
-            video_prefix=f"iter-{iter+1}",
+            level=level,
+            recording_path=f"recordings/{config.experiment_name}/{level}",
+            video_prefix=f"epoch-{start_epoch}",
         )
 
         GameLoop(config, env, agent, None).run(
             render=False,
             train=False,
         )
-
-
-if __name__ == "__main__":
-    main()

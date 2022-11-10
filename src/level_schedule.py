@@ -7,6 +7,12 @@ level_progression = [f"{w}-{l}" for w in range(1, 9) for l in range(1, 5)]
 schedule_cache = {0: []}
 
 
+def get_linear_level_schedule(num_repetitions_per_level: int = 1) -> List[str]:
+    return sum(
+        [[level] * num_repetitions_per_level for level in level_progression], start=[]
+    )
+
+
 def get_level_schedule(up_to_idx: Optional[int] = None) -> List[str]:
     if up_to_idx is None:
         up_to_idx = len(level_progression)

@@ -1,15 +1,16 @@
 import logging
-from datetime import datetime
 
 import hydra
-from hydra.utils import get_original_cwd
 
-logging.basicConfig(level=logging.INFO)
+from src.level_schedule import get_linear_level_schedule
+
+logging.basicConfig(level=logging.ERROR)
 
 from omegaconf import DictConfig
 
 from src.agents import get_agent
-from src.environment import MultiprocessEnvironment
+from src.checkpoints import CheckpointHandler
+from src.environment import get_num_actions, get_singleprocess_environment
 from src.game_loop import GameLoop
 from src.summary import Summary
 
@@ -17,27 +18,30 @@ from src.summary import Summary
 @hydra.main(version_base="1.2", config_path="configs", config_name="config")
 def main(config: DictConfig) -> None:
 
-    base_name = "2022-09-17_17:21_lin-dec_0.0004_24-workers_conv-4x32-3-2_lin-0x256_com-1x256_actval-0x256"
-
-    config.environment.env_name = "SuperMarioBros-v0"
-    env = MultiprocessEnvironment(1, config.environment)
     agent = get_agent(
         config.agent,
-        1,
-        env.observation_space.shape,
-        env.action_space.n,
+        config.num_workers,
+        get_num_actions(config.environment),
         None,
     )
 
-    checkpoint_path = f"{get_original_cwd()}/models/{base_name}/checkpoint."
-    if config.load_step > 0:
-        agent.load(checkpoint_path + f"{config.load_step:05d}")
+    for level in get_linear_level_schedule(num_repetitions_per_level=1):
+        checkpoint_handler = CheckpointHandler(config.experiment_name, level)
+        if not checkpoint_handler.checkpoints_exist():
+            continue
 
-    GameLoop(config, env, agent, None, 1, checkpoint_path).run(
-        render=True,
-        train=False,
-    )
+        start_epoch = checkpoint_handler.find_max_saved_epoch() + 1
+        agent.load(checkpoint_handler.get_save_path(start_epoch - 1))
 
+        agent.set_num_workers(1)
 
-if __name__ == "__main__":
-    main()
+        logging.info(f"Eval trained model at epoch {start_epoch} on level {level}")
+        env = get_singleprocess_environment(
+            config=config.environment,
+            level=level,
+        )
+
+        GameLoop(config, env, agent, None).run(
+            render=True,
+            train=False,
+        )
