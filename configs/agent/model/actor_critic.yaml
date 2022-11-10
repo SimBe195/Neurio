@@ -2,11 +2,13 @@ defaults:
   - encoder: conv_encoder
   - _self_
 
+num_common_layers: 1
+common_layer_size: 256
+
 num_actor_layers: 0
-actor_layer_size: 512
+actor_layer_size: 256
 
 num_critic_layers: 0
-critic_layer_size: 512
+critic_layer_size: 256
 
-use_action_history: True
-action_embedding_size: 64
+action_embedding_size: 128
