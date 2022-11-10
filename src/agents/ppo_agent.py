@@ -26,6 +26,7 @@ class PPOAgent(Agent):
         self.batch_size = config.batch_size
 
         self.clip_param = config.clip_param
+        self.clip_value = config.clip_value
         self.critic_loss_weight = config.critic_loss_weight
         self.entropy_loss_weight = config.entropy_loss_weight
         self.grad_clip_norm = config.grad_clip_norm
@@ -82,9 +83,10 @@ class PPOAgent(Agent):
         _, v = self.actor_critic(state, action, training=True)
         self.experience_buffer.buffer_values(v[:, 0].numpy())
 
+        values = self.experience_buffer.get_value_buffer()
         advantages, returns = gae_advantage_estimate(
             self.experience_buffer.get_reward_buffer(),
-            self.experience_buffer.get_value_buffer(),
+            values,
             self.experience_buffer.get_dones_buffer(),
             self.gamma,
             self.gae_lambda,
@@ -95,6 +97,7 @@ class PPOAgent(Agent):
         prev_actions = self.experience_buffer.get_prev_action_buffer()
         log_probs = self.experience_buffer.get_log_prob_buffer()
 
+        values = tf.reshape(values[:-1], (-1,))
         advantages = tf.reshape(advantages, (-1,))
         returns = tf.reshape(returns, (-1,))
         states = tf.reshape(states, (-1, *(states.shape[2:])))
@@ -103,10 +106,10 @@ class PPOAgent(Agent):
         log_probs = tf.reshape(log_probs, (-1,))
 
         num_steps = states.shape[0]
+        num_batches = -(-num_steps // self.batch_size)
         losses = {"actor": 0, "critic": 0, "entropy": 0, "total": 0}
         for e in range(self.epochs_per_update):
             indices = tf.random.shuffle(tf.range(num_steps))
-            num_batches = -(-num_steps // self.batch_size)
             for b in range(num_batches):
                 batch_indices = indices[
                     b * self.batch_size : min(num_steps, (b + 1) * self.batch_size)
@@ -114,6 +117,7 @@ class PPOAgent(Agent):
                 batch_states = tf.gather(states, batch_indices)
                 batch_log_probs = tf.gather(log_probs, batch_indices)
                 batch_actions = tf.gather(actions, batch_indices)
+                batch_values = tf.gather(values, batch_indices)
                 batch_prev_actions = tf.gather(prev_actions, batch_indices)
                 batch_advantages = tf.gather(advantages, batch_indices)
                 batch_returns = tf.gather(returns, batch_indices)
@@ -140,33 +144,62 @@ class PPOAgent(Agent):
                     losses["actor"] += act_loss
 
                     # Critic loss
-                    crit_loss = tf.keras.losses.Huber()(batch_returns, v[:, 0])
+                    v_1 = v[:, 0]
+                    crit_loss_1 = 0.5 * tf.math.squared_difference(batch_returns, v_1)
+                    # crit_loss_1 = tf.keras.losses.Huber()(batch_returns, v_1)
+                    if self.clip_value:
+                        v_2 = tf.clip_by_value(
+                            v[:, 0],
+                            batch_values - self.clip_param,
+                            batch_values + self.clip_param,
+                        )
+                        crit_loss_2 = 0.5 * tf.math.squared_difference(
+                            batch_returns, v_2
+                        )
+                        # crit_loss_2 = tf.keras.losses.Huber()(batch_returns, v_2)
+                        crit_loss = tf.reduce_mean(
+                            tf.math.maximum(crit_loss_1, crit_loss_2)
+                        )
+                    else:
+                        crit_loss = tf.reduce_mean(crit_loss_1)
+                        tf.debugging.check_numerics(crit_loss, " ")
                     losses["critic"] += crit_loss
 
                     # Entropy loss
-                    clipped_policy = tf.clip_by_value(policy, 1e-10, 1)
-                    entropy = tf.reduce_mean(
-                        tf.reduce_sum(clipped_policy * tf.math.log(clipped_policy))
+                    clipped_policy = tf.clip_by_value(policy, 1e-05, 1.0)
+                    entropy = tf.math.negative(
+                        tf.math.reduce_sum(
+                            clipped_policy * tf.math.log(clipped_policy), axis=-1
+                        )
                     )
+                    entropy = tf.reduce_mean(entropy)
                     losses["entropy"] += entropy
 
                     loss = (
                         act_loss
                         + self.critic_loss_weight * crit_loss
-                        + self.entropy_loss_weight * entropy
+                        - self.entropy_loss_weight * entropy
                     )
                     losses["total"] += loss
 
                 grads = tape.gradient(loss, self.actor_critic.trainable_variables)
                 grads = [tf.clip_by_norm(grad, self.grad_clip_norm) for grad in grads]
+                grads = [
+                    tf.where(tf.math.is_nan(grad), tf.zeros_like(grad), grad)
+                    for grad in grads
+                ]
+                # for grad, var in zip(grads, self.actor_critic.trainable_variables):
+                #     tf.debugging.check_numerics(
+                #         grad, f"Grad for variable {var} is NaN."
+                #     )
                 self.opt.apply_gradients(
                     zip(grads, self.actor_critic.trainable_variables)
                 )
         for key in losses:
             losses[key] /= num_batches * self.epochs_per_update
-        logging.info(f"Update finished. Losses: {losses}")
+        logging.debug(f"Update finished. Losses: {losses}")
         for key, loss in losses.items():
-            self.summary.log_update_stat(loss, f"{key}_loss")
+            self.summary.log_update_stat(loss, f"loss/{key}")
         self.summary.log_update_stat(self.opt._decayed_lr(tf.float32), "learning_rate")
         self.summary.next_update()
 
