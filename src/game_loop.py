@@ -19,7 +19,7 @@ class GameLoop:
         self.agent = agent
         self.summary = summary
 
-        self.num_updates = config.num_updates
+        self.num_updates = config.num_updates_per_level
         self.steps_per_update = config.steps_per_update
         self.current_states = [None] * self.agent.num_workers
 
