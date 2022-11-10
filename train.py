@@ -31,7 +31,7 @@ def main(config: DictConfig) -> None:
         summary,
     )
 
-    for level in get_linear_level_schedule():
+    for level in get_linear_level_schedule(num_repetitions_per_level=5):
         checkpoint_handler = CheckpointHandler(config.experiment_name, level)
         start_epoch = 0
         if checkpoint_handler.checkpoints_exist():
@@ -68,3 +68,8 @@ def main(config: DictConfig) -> None:
             render=False,
             train=False,
         )
+        env.close()
+
+
+if __name__ == "__main__":
+    main()
