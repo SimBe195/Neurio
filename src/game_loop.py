@@ -1,7 +1,6 @@
-import logging
-
 import numpy as np
 from omegaconf import DictConfig
+from tqdm import tqdm
 
 from src.agents import Agent
 from src.environment import BaseEnvironment
