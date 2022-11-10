@@ -30,9 +30,7 @@ class PPOAgent(Agent):
         self.entropy_loss_weight = config.entropy_loss_weight
         self.grad_clip_norm = config.grad_clip_norm
 
-        self.experience_buffer = ExperienceBuffer(
-            self.num_workers, config.num_input_frames
-        )
+        self.experience_buffer = ExperienceBuffer(self.num_workers)
 
         self.actor_critic = ActorCritic(
             config=config.model,
@@ -44,6 +42,10 @@ class PPOAgent(Agent):
             ),
             epsilon=config.optimizer_epsilon,
         )
+
+    def set_num_workers(self, num_workers: int) -> None:
+        super().set_num_workers(num_workers)
+        self.experience_buffer = ExperienceBuffer(num_workers)
 
     def next_actions(self, train: bool = True) -> List[int]:
         in_states = self.experience_buffer.get_last_states()
@@ -171,4 +173,7 @@ class PPOAgent(Agent):
         self.experience_buffer.reset()
 
     def feed_observation(self, state: np.array) -> None:
+        # State has shape (<num_workers>, <num_stack_frames>, <height>, <width>, <num_channels>)
+        # Stack in channel dimension instead
+        state = np.concatenate(np.moveaxis(state, 1, 0), axis=-1)
         self.experience_buffer.buffer_states(state)
