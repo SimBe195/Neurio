@@ -12,12 +12,10 @@ class Agent(ABC):
         self,
         config: DictConfig,
         num_workers: int,
-        observation_shape: Tuple[int, ...],
         num_actions: int,
         summary: Summary,
     ) -> None:
         self.num_workers = num_workers
-        self.observation_shape = observation_shape
         self.num_actions = num_actions
         self.summary = summary
 
@@ -42,3 +40,6 @@ class Agent(ABC):
 
     def give_reward(self, reward: float, done: bool = False) -> None:
         pass
+
+    def set_num_workers(self, num_workers: int) -> None:
+        self.num_workers = num_workers
