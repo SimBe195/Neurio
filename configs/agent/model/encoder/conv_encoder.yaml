@@ -2,5 +2,3 @@ num_conv_layers: 4
 num_filters: 32
 kernel_size: 3
 stride: 2
-num_linear_layers: 0
-linear_layer_size: 256

@@ -39,14 +39,6 @@ class ConvEncoder(tf.keras.Sequential):
                 )
             )
         self.add(tf.keras.layers.Flatten())
-        for _ in range(config.num_linear_layers):
-            self.add(
-                tf.keras.layers.Dense(
-                    config.linear_layer_size,
-                    activation="relu",
-                    kernel_initializer=initializer,
-                )
-            )
 
 
 class ActorCritic(tf.keras.Model):
