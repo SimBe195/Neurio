@@ -25,13 +25,17 @@ def get_num_actions(config: DictConfig) -> int:
 
 
 class BaseEnvironment(JoypadSpace):
-    def __init__(self, config: DictConfig, level: str = "") -> None:
+    def __init__(
+        self, config: DictConfig, level: str = "", render_mode="human"
+    ) -> None:
         name = config.env_name
         if level:
             name = name.replace("Bros-v", f"Bros-{level}-v")
         super().__init__(
             gym_super_mario_bros.make(
-                name, apply_api_compatibility=True, render_mode="rgb_array"
+                name,
+                apply_api_compatibility=True,
+                render_mode=render_mode,
             ),
             COMPLEX_MOVEMENT if config.complex_movement else SIMPLE_MOVEMENT,
         )

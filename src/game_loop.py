@@ -52,9 +52,6 @@ class GameLoop:
 
                     dones = np.logical_or(terminateds, truncateds)
 
-                    if render:
-                        self.env.render()
-
                     self.agent.give_reward(rewards, dones)
 
                     for w in range(self.agent.num_workers):

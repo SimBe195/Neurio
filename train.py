@@ -44,6 +44,7 @@ def main(config: DictConfig) -> None:
             config.num_workers,
             config=config.environment,
             level=level,
+            render_mode="human",
         )
 
         GameLoop(config, env, agent, summary).run(
@@ -62,6 +63,7 @@ def main(config: DictConfig) -> None:
             level=level,
             recording_path=f"recordings/{config.experiment_name}/{level}",
             video_prefix=f"epoch-{start_epoch}",
+            render_mode="rgb_array",
         )
 
         GameLoop(config, env, agent, None).run(
