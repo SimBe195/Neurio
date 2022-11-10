@@ -8,9 +8,7 @@ schedule_cache = {0: []}
 
 
 def get_linear_level_schedule(num_repetitions_per_level: int = 1) -> List[str]:
-    return sum(
-        [[level] * num_repetitions_per_level for level in level_progression], start=[]
-    )
+    return np.repeat(level_progression, num_repetitions_per_level).tolist()
 
 
 def get_level_schedule(up_to_idx: Optional[int] = None) -> List[str]:
