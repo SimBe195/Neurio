@@ -1,9 +1,5 @@
 defaults:
-  - base
+  - clipped
   - _self_
-clip_top: 33
-clip_bot: 19
-clip_left: 28
-clip_right: 0
-reduce_factor: 2
-greyscale: True
+width: 114
+height: 94
