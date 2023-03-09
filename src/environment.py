@@ -14,14 +14,13 @@ import gym_super_mario_bros
 import numpy as np
 import numpy.typing as npt
 from gym.core import Env, ObservationWrapper, Wrapper
-from gym.spaces import Box
+from gym.spaces import Box, Discrete, MultiDiscrete
 from gym_super_mario_bros.actions import COMPLEX_MOVEMENT, SIMPLE_MOVEMENT
 from nes_py.wrappers import JoypadSpace  # type: ignore
 from omegaconf import DictConfig
 
-
-def get_num_actions(config: DictConfig) -> int:
-    return len(COMPLEX_MOVEMENT) if config.complex_movement else len(SIMPLE_MOVEMENT)
+BASE_WIDTH = 256
+BASE_HEIGHT = 240
 
 
 class BaseEnvironment(JoypadSpace):
@@ -50,8 +49,8 @@ class ClipWrapper(ObservationWrapper):
         self.clip_left: int = config.clip_left
         self.clip_right: int = config.clip_right
 
-        self.new_width = 256 - self.clip_left - self.clip_right
-        self.new_height = 240 - self.clip_top - self.clip_bot
+        self.new_width = BASE_WIDTH - self.clip_left - self.clip_right
+        self.new_height = BASE_HEIGHT - self.clip_top - self.clip_bot
 
         obs_shape = self.observation_space.shape
         if obs_shape is None:
@@ -78,14 +77,16 @@ class SubsampleWrapper(ObservationWrapper):
     def __init__(self, config: DictConfig, env: Env, **kwargs) -> None:
         super().__init__(env, **kwargs)
 
-        self.width: int = config.width
-        self.height: int = config.height
+        factor: float = config.subsampling_factor
 
         obs_shape = self.observation_space.shape
         if obs_shape is None:
-            obs_shape = (self.height, self.width)
+            obs_shape = (int(BASE_HEIGHT / factor), int(BASE_WIDTH / factor))
         else:
-            obs_shape = (self.height, self.width, *obs_shape[2:])
+            h, w = obs_shape[:2]
+            obs_shape = (int(h / factor), int(w / factor), *obs_shape[2:])
+
+        self.height, self.width = obs_shape[:2]
 
         self.observation_space = Box(
             low=0,
@@ -199,3 +200,40 @@ def get_multiprocess_environment(num_environments: int, *args, **kwargs) -> Env:
         [lambda: get_environment(*args, **kwargs) for _ in range(num_environments)],
         copy=False,
     )
+
+
+def get_stack_frames(env: Env) -> int:
+    obs_space = env.observation_space.shape
+    assert obs_space is not None
+    if len(obs_space) >= 4:
+        return obs_space[-4]
+    return 1
+
+
+def get_height(env: Env) -> int:
+    obs_space = env.observation_space.shape
+    assert obs_space is not None
+    assert len(obs_space) >= 3
+    return obs_space[-3]
+
+
+def get_width(env: Env) -> int:
+    obs_space = env.observation_space.shape
+    assert obs_space is not None
+    assert len(obs_space) >= 3
+    return obs_space[-2]
+
+
+def get_channels(env: Env) -> int:
+    obs_space = env.observation_space.shape
+    assert obs_space is not None
+    assert len(obs_space) >= 3
+    return obs_space[-1]
+
+
+def get_num_actions(env: Env) -> int:
+    act_space = env.action_space
+    if isinstance(act_space, Discrete):
+        return act_space.n
+    assert isinstance(act_space, MultiDiscrete)
+    return act_space.nvec[0]

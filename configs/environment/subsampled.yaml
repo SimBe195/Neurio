@@ -1,7 +1,6 @@
 defaults:
   - clipped
   - _self_
-width: 114
-height: 94
+subsampling_factor: 2
 
 description: "subs-env"

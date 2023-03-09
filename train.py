@@ -10,7 +10,14 @@ from omegaconf import DictConfig
 
 from src.agents import get_agent
 from src.checkpoints import CheckpointHandler
-from src.environment import get_multiprocess_environment, get_num_actions
+from src.environment import (
+    get_channels,
+    get_height,
+    get_multiprocess_environment,
+    get_num_actions,
+    get_stack_frames,
+    get_width,
+)
 from src.game_loop import GameLoop
 from src.summary import Summary
 
@@ -30,19 +37,6 @@ def main(config: DictConfig) -> None:
     summary = Summary(config.experiment_name)
     summary.load(save_path)
 
-    # Set up agent
-    agent = get_agent(
-        config=config.agent,
-        in_width=114,
-        in_height=94,
-        in_channels=1,
-        in_stack_frames=3,
-        num_workers=config.num_workers,
-        num_actions=get_num_actions(config.environment),
-        summary=summary,
-    )
-    agent.load(save_path)
-
     # Create env
     train_env = get_multiprocess_environment(
         config.num_workers,
@@ -50,6 +44,19 @@ def main(config: DictConfig) -> None:
         level=level,
         render_mode=None,
     )
+
+    # Set up agent
+    agent = get_agent(
+        config=config.agent,
+        in_width=get_width(train_env),
+        in_height=get_height(train_env),
+        in_channels=get_channels(train_env),
+        in_stack_frames=get_stack_frames(train_env),
+        num_workers=config.num_workers,
+        num_actions=get_num_actions(train_env),
+        summary=summary,
+    )
+    agent.load(save_path)
 
     # Run game loop
     log.info(f"Train on level {level}")
@@ -66,6 +73,7 @@ def main(config: DictConfig) -> None:
         save_path.mkdir(parents=True)
         log.info(f"Save model checkpoint at iter {start_iter}.")
         agent.save(save_path)
+        summary.save(save_path)
 
 
 if __name__ == "__main__":

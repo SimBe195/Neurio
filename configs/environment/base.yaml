@@ -8,8 +8,7 @@ clip_top: 0
 clip_bot: 0
 clip_left: 0
 clip_right: 0
-width: 256
-height: 240
+subsampling_factor: 1
 grayscale: True
 
 description: "base-env"
