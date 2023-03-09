@@ -3,6 +3,6 @@ learning_rate: 5e-04
 config:
   start_factor: 1.0
   end_factor: 0.2
-  total_iters: 240000
+  total_iters: 2000
 
 description: "lin-dec-${agent.learning_rate.learning_rate}"
