@@ -5,3 +5,5 @@ clip_top: 33
 clip_bot: 19
 clip_left: 28
 clip_right: 0
+
+description: "clip-env"

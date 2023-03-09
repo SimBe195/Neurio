@@ -1,72 +1,95 @@
-import numpy as np
+from typing import List
+
+import torch
 
 
 class ExperienceBuffer:
     def __init__(self, num_workers: int) -> None:
-        self.states = []
-        self.actions = []
-        self.prev_actions = [np.zeros(shape=(num_workers,), dtype=np.int32)]
-        self.values = []
-        self.rewards = []
-        self.dones = []
-        self.log_probs = []
-
         self.num_workers = num_workers
 
-    def buffer_states(self, states: np.array) -> None:
-        self.states.append(states)
+        self.states: List[torch.Tensor] = []
+        self.actions: List[torch.Tensor] = []
+        self.prev_actions: List[torch.Tensor] = [
+            torch.zeros(size=(self.num_workers,), dtype=torch.int64)
+        ]
+        self.values: List[torch.Tensor] = []
+        self.rewards: List[torch.Tensor] = []
+        self.dones: List[torch.Tensor] = []
+        self.log_probs: List[torch.Tensor] = []
 
-    def buffer_actions(self, actions: np.array) -> None:
-        self.prev_actions.append(actions)
-        self.actions.append(actions)
+    def buffer_states(self, states: torch.Tensor) -> None:
+        assert states.dim() == 4
+        assert states.size(0) == self.num_workers
+        self.states.append(states.to(torch.float32))
 
-    def buffer_values(self, values: np.array) -> None:
-        self.values.append(values)
+    def buffer_actions(self, actions: torch.Tensor) -> None:
+        assert actions.dim() == 1
+        assert actions.size(0) == self.num_workers
+        actions_cast = actions.to(torch.int64)
+        self.prev_actions.append(actions_cast)
+        self.actions.append(actions_cast)
 
-    def buffer_log_probs(self, log_probs: np.array) -> None:
-        self.log_probs.append(log_probs)
+    def buffer_values(self, values: torch.Tensor) -> None:
+        assert values.dim() == 1
+        assert values.size(0) == self.num_workers
+        self.values.append(values.to(torch.float32))
 
-    def buffer_rewards(self, rewards: np.array) -> None:
-        self.rewards.append(rewards)
+    def buffer_log_probs(self, log_probs: torch.Tensor) -> None:
+        assert log_probs.dim() == 1
+        assert log_probs.size(0) == self.num_workers
+        self.log_probs.append(log_probs.to(torch.float32))
 
-    def buffer_dones(self, dones: np.array) -> None:
-        for w in range(self.num_workers):
-            if dones[w] == 1:
-                self.prev_actions[-1][w] = 0
-        self.dones.append(dones)
+    def buffer_rewards(self, rewards: torch.Tensor) -> None:
+        assert rewards.dim() == 1
+        assert rewards.size(0) == self.num_workers
+        self.rewards.append(rewards.to(torch.float32))
 
-    def reset(self) -> None:
+    def buffer_dones(self, dones: torch.Tensor) -> None:
+        assert dones.dim() == 1
+        assert dones.size(0) == self.num_workers
+        dones_cast = dones.to(torch.int64)
+        self.prev_actions.append(
+            torch.multiply(self.prev_actions.pop(-1), 1 - dones_cast)
+        )
+        self.dones.append(dones_cast)
+
+    def reset(self, forget_prev_action: bool = False) -> None:
         self.states = []
-        self.prev_actions = self.prev_actions[-1:]
+        if forget_prev_action:
+            self.prev_actions = [
+                torch.zeros(size=(self.num_workers,), dtype=torch.int64)
+            ]
+        else:
+            self.prev_actions = self.prev_actions[-1:]
         self.dones = []
         self.actions = []
         self.values = []
         self.rewards = []
         self.log_probs = []
 
-    def get_last_states(self) -> np.array:
+    def get_last_states(self) -> torch.Tensor:
         return self.states[-1]
 
-    def get_last_actions(self) -> np.array:
+    def get_last_actions(self) -> torch.Tensor:
         return self.prev_actions[-1]
 
-    def get_state_buffer(self) -> np.array:
-        return np.stack(self.states, axis=0)
+    def get_state_buffer(self) -> torch.Tensor:
+        return torch.stack(self.states)
 
-    def get_action_buffer(self) -> np.array:
-        return np.stack(self.actions, axis=0)
+    def get_action_buffer(self) -> torch.Tensor:
+        return torch.stack(self.actions)
 
-    def get_prev_action_buffer(self) -> np.array:
-        return np.stack(self.prev_actions[:-1], axis=0)
+    def get_prev_action_buffer(self) -> torch.Tensor:
+        return torch.stack(self.prev_actions[:-1])
 
-    def get_value_buffer(self) -> np.array:
-        return np.stack(self.values, axis=0)
+    def get_value_buffer(self) -> torch.Tensor:
+        return torch.stack(self.values)
 
-    def get_log_prob_buffer(self) -> np.array:
-        return np.stack(self.log_probs, axis=0)
+    def get_log_prob_buffer(self) -> torch.Tensor:
+        return torch.stack(self.log_probs)
 
-    def get_reward_buffer(self) -> np.array:
-        return np.stack(self.rewards, axis=0)
+    def get_reward_buffer(self) -> torch.Tensor:
+        return torch.stack(self.rewards)
 
-    def get_dones_buffer(self) -> np.array:
-        return np.stack(self.dones, axis=0)
+    def get_dones_buffer(self) -> torch.Tensor:
+        return torch.stack(self.dones)

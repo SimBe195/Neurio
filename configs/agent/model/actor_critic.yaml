@@ -2,13 +2,10 @@ defaults:
   - encoder: conv_encoder
   - _self_
 
-num_common_layers: 1
-common_layer_size: 256
+actor_fc_size: 512
 
-num_actor_layers: 1
-actor_layer_size: 256
-
-num_critic_layers: 1
-critic_layer_size: 256
+critic_fc_size: 512
 
 action_embedding_size: 128
+
+description: "enc-${agent.model.encoder.description}_act-${agent.model.actor_fc_size}_crit-${agent.model.critic_fc_size}"

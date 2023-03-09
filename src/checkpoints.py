@@ -1,25 +1,24 @@
-import glob
-import re
-from typing import Tuple
+from pathlib import Path
 
 from hydra.utils import get_original_cwd
 
 
 class CheckpointHandler:
-    def __init__(self, model_name, level):
+    def __init__(self, model_name: str, level: str):
         self.base_checkpoint_path = (
-            f"{get_original_cwd()}/models/{model_name}/{level}/checkpoint."
+            Path(get_original_cwd()) / "models" / model_name / level
         )
 
-    def get_save_path(self, epoch: int) -> str:
-        return self.base_checkpoint_path + f"{epoch:03d}"
+    def get_save_path(self, iter: int) -> Path:
+        return self.base_checkpoint_path / f"iter-{iter:05d}"
 
     def checkpoints_exist(self) -> bool:
-        return bool(glob.glob(self.base_checkpoint_path + "*"))
+        return bool(list(self.base_checkpoint_path.glob("*")))
 
-    def find_max_saved_epoch(self) -> int:
-        def extract_epoch(filename: str) -> Tuple[int, str]:
-            search = re.findall("\d+\.", filename)
-            return int(search[0]) if search else -1, filename
+    def find_max_saved_iter(self) -> int:
+        def extract_iter(filename: Path) -> int:
+            return int(filename.name[-5:])
 
-        return max(glob.glob(self.base_checkpoint_path + "*"), key=extract_epoch)
+        return max(
+            [extract_iter(filename) for filename in self.base_checkpoint_path.glob("*")]
+        )

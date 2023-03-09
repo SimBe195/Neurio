@@ -2,75 +2,70 @@ import logging
 
 import hydra
 
-from src.level_schedule import get_linear_level_schedule
+logging.basicConfig(level=logging.DEBUG)
 
-logging.basicConfig(level=logging.ERROR)
+log = logging.getLogger(__name__)
 
 from omegaconf import DictConfig
 
 from src.agents import get_agent
 from src.checkpoints import CheckpointHandler
-from src.environment import (
-    get_multiprocess_environment,
-    get_num_actions,
-    get_singleprocess_environment,
-)
+from src.environment import get_multiprocess_environment, get_num_actions
 from src.game_loop import GameLoop
 from src.summary import Summary
 
 
-@hydra.main(version_base="1.2", config_path="configs", config_name="config")
+@hydra.main(version_base="1.3", config_path="configs", config_name="config")
 def main(config: DictConfig) -> None:
+    # Get most recent iter
+    level = config.level
+    checkpoint_handler = CheckpointHandler(config.experiment_name, level)
+    start_iter = 0
+    save_path = None
+    if checkpoint_handler.checkpoints_exist():
+        start_iter = checkpoint_handler.find_max_saved_iter()
+        save_path = checkpoint_handler.get_save_path(start_iter)
 
+    # Create summary
     summary = Summary(config.experiment_name)
+    summary.load(save_path)
 
+    # Set up agent
     agent = get_agent(
-        config.agent,
+        config=config.agent,
+        in_width=114,
+        in_height=94,
+        in_channels=1,
+        in_stack_frames=3,
+        num_workers=config.num_workers,
+        num_actions=get_num_actions(config.environment),
+        summary=summary,
+    )
+    agent.load(save_path)
+
+    # Create env
+    train_env = get_multiprocess_environment(
         config.num_workers,
-        get_num_actions(config.environment),
-        summary,
+        config=config.environment,
+        level=level,
+        render_mode=None,
     )
 
-    for level in get_linear_level_schedule(num_repetitions_per_level=5):
-        checkpoint_handler = CheckpointHandler(config.experiment_name, level)
-        start_epoch = 0
-        if checkpoint_handler.checkpoints_exist():
-            start_epoch = checkpoint_handler.find_max_saved_epoch() + 1
-            agent.load(checkpoint_handler.get_save_path(start_epoch - 1))
-
-        agent.set_num_workers(config.num_workers)
-        logging.info(f"Train on level {level}, starting at epoch {start_epoch}")
-        env = get_multiprocess_environment(
-            config.num_workers,
-            config=config.environment,
-            level=level,
-            render_mode="human",
-        )
-
-        GameLoop(config, env, agent, summary).run(
-            render=False,
+    # Run game loop
+    log.info(f"Train on level {level}")
+    while start_iter < config.num_iters:
+        num_iters = min(config.num_iters - start_iter, config.save_frequency)
+        log.info(f"Run loop for {num_iters} iters, starting at iter {start_iter}.")
+        GameLoop(config, train_env, agent, summary).run(
+            num_iters=num_iters,
             train=True,
         )
-        env.close()
 
-        agent.save(checkpoint_handler.get_save_path(start_epoch))
-
-        agent.set_num_workers(1)
-
-        logging.info(f"Eval on level {level}")
-        env = get_singleprocess_environment(
-            config=config.environment,
-            level=level,
-            recording_path=f"recordings/{config.experiment_name}/{level}",
-            video_prefix=f"epoch-{start_epoch}",
-            render_mode="rgb_array",
-        )
-
-        GameLoop(config, env, agent, None).run(
-            render=False,
-            train=False,
-        )
-        env.close()
+        start_iter += num_iters
+        save_path = checkpoint_handler.get_save_path(start_iter)
+        save_path.mkdir(parents=True)
+        log.info(f"Save model checkpoint at iter {start_iter}.")
+        agent.save(save_path)
 
 
 if __name__ == "__main__":

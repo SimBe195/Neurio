@@ -1,6 +1,7 @@
-class_name: PolynomialDecay
+class_name: ConstantLR
+learning_rate: 4e-04
 config:
-  initial_learning_rate: 4e-04
-  end_learning_rate: 4e-04
-  decay_steps: 1
-  power: 1.0
+  factor: 1
+  total_iters: 0
+
+description: "const-${agent.learning_rate.config.initial_learning_rate}"

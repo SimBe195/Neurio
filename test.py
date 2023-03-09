@@ -2,9 +2,9 @@ import logging
 
 import hydra
 
-from src.level_schedule import get_linear_level_schedule
-
 logging.basicConfig(level=logging.ERROR)
+
+log = logging.getLogger(__name__)
 
 from omegaconf import DictConfig
 
@@ -12,36 +12,42 @@ from src.agents import get_agent
 from src.checkpoints import CheckpointHandler
 from src.environment import get_num_actions, get_singleprocess_environment
 from src.game_loop import GameLoop
-from src.summary import Summary
 
 
-@hydra.main(version_base="1.2", config_path="configs", config_name="config")
+@hydra.main(version_base="1.3", config_path="configs", config_name="config")
 def main(config: DictConfig) -> None:
-
+    # Set up agent
     agent = get_agent(
         config.agent,
-        config.num_workers,
-        get_num_actions(config.environment),
-        None,
+        in_width=114,
+        in_height=94,
+        in_channels=1,
+        in_stack_frames=3,
+        num_workers=1,
+        num_actions=get_num_actions(config.environment),
     )
 
-    for level in get_linear_level_schedule(num_repetitions_per_level=1):
-        checkpoint_handler = CheckpointHandler(config.experiment_name, level)
-        if not checkpoint_handler.checkpoints_exist():
-            continue
+    # Load checkpoint
+    level = config.level
+    log.info(f"Eval trained model on level {level}")
 
-        start_epoch = checkpoint_handler.find_max_saved_epoch() + 1
-        agent.load(checkpoint_handler.get_save_path(start_epoch - 1))
+    checkpoint_handler = CheckpointHandler(config.experiment_name, level)
+    if not checkpoint_handler.checkpoints_exist():
+        log.error("No checkpoint found.")
+        return
 
-        agent.set_num_workers(1)
+    load_iter = checkpoint_handler.find_max_saved_iter()
+    log.info(f"Loading checkpoint from epoch {load_iter}")
+    agent.load(checkpoint_handler.get_save_path(load_iter))
 
-        logging.info(f"Eval trained model at epoch {start_epoch} on level {level}")
-        env = get_singleprocess_environment(
-            config=config.environment,
-            level=level,
-        )
+    env = get_singleprocess_environment(
+        config=config.environment,
+        level=level,
+        render_mode="human",
+    )
 
-        GameLoop(config, env, agent, None).run(
-            render=True,
-            train=False,
-        )
+    GameLoop(config, env, agent).run(train=False)
+
+
+if __name__ == "__main__":
+    main()

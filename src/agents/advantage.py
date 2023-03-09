@@ -1,39 +1,40 @@
 from typing import Tuple
 
-import numpy as np
+import torch
 
 
 def gae_advantage_estimate(
-    rewards: np.array,
-    values: np.array,
-    dones: np.array,
+    rewards: torch.Tensor,
+    values: torch.Tensor,
+    dones: torch.Tensor,
     gamma: float,
-    gae_lambda: float,
-) -> Tuple[np.array, np.array]:
-    assert len(rewards) == len(values) - 1 == len(dones)
+    tau: float,
+    normalize: bool = True,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    # Shape (T, W) or (T)
+    assert rewards.dim() == values.dim() == dones.dim() <= 2
 
-    returns = []
-    advantages = []
+    # Value has time T+1 to contain the next_value after the last state
+    assert rewards.shape[0] == values.shape[0] - 1 == dones.shape[0]
+
+    # Worker dimension is the same for every one
+    if rewards.dim() == 2:
+        assert rewards.shape[1] == values.shape[1] == dones.shape[1]
+
+    # Shape (T, W) or (T)
+    deltas = rewards + gamma * values[1:] * (1 - dones) - values[:-1]
+
+    advantages = torch.zeros_like(rewards)
     gae = 0
-    for reward, value, next_value, done in reversed(
-        list(
-            zip(
-                rewards,
-                values[:-1],
-                values[1:],
-                dones,
-            )
-        )
-    ):
-        delta = reward + gamma * next_value * (1 - done) - value
-        gae = delta + gamma * gae_lambda * (1 - done) * gae
-        returns.insert(0, gae + value)
-        advantages.insert(0, gae)
+    for t in reversed(range(len(rewards))):
+        delta = deltas[t]
+        gae = delta + gamma * tau * (1 - dones[t]) * gae
 
-    returns = np.stack(returns, axis=0).astype(np.float32)
-    advantages = np.stack(advantages, axis=0).astype(np.float32)
-    advantages = (advantages - np.mean(advantages, axis=0)[None, ...]) / (
-        np.clip(np.std(advantages, axis=0)[None, ...], 1e-10, None)
-    )
+        advantages[t] = gae
+
+    if normalize:
+        advantages = (advantages - torch.mean(advantages)) / torch.std(advantages)
+
+    returns = advantages + values[:-1]
 
     return advantages, returns
