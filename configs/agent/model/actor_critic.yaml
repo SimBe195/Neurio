@@ -4,4 +4,4 @@ defaults:
 
 action_embedding_size: 128
 
-description: "enc-${agent.model.encoder.description}_act-${agent.model.actor_fc_size}_crit-${agent.model.critic_fc_size}"
+description: "enc-${agent.model.encoder.description}"

@@ -1,10 +1,8 @@
 from abc import ABC, abstractmethod
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy.typing as npt
 import optuna
-import torch
 from omegaconf import DictConfig
 
 from src.environment import EnvironmentInfo

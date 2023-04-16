@@ -26,7 +26,7 @@ class ConvEncoder(nn.Module):
                 )
                 num_filters.append(filter_size)
 
-            fc_size = trial.suggest_int("conv_fc_size", 300, 700)
+            fc_size = trial.suggest_int("conv_fc_size", 400, 600)
         else:
             assert isinstance(config.num_filters, ListConfig)
             num_filters = config.num_filters

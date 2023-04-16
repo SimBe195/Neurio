@@ -24,9 +24,9 @@ def main(config: DictConfig) -> None:
         direction="maximize",
         load_if_exists=True,
         storage=f"sqlite:///optuna_studies/{study_name}.db",
-        pruner=optuna.pruners.MedianPruner(n_startup_trials=10, n_warmup_steps=100),
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=100),
     )
-    study.optimize(Objective(config, exp_id), n_trials=1000)
+    study.optimize(Objective(config, exp_id), n_trials=10)
 
     logging.info(f"Best params: {study.best_params}")
     logging.info(f"Best value: {study.best_value}")

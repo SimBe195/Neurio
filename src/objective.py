@@ -9,7 +9,7 @@ from tqdm import tqdm
 from .agents import Agent, get_agent_class
 from .environment import get_env_info, get_multiprocess_environment
 from .game_loop import GameLoop
-from .moving_average import MovingAverage
+from .reward_trackers import MaxReward, MinReward, MovingAverageReward
 
 log = logging.getLogger(__name__)
 
@@ -38,7 +38,6 @@ class Objective:
                 config=self.config.environment,
                 level=level,
                 render_mode=None,
-                trial=trial,
             )
 
             # Set up agent
@@ -49,11 +48,11 @@ class Objective:
             # Run game loop
             log.info(f"Train on level {level}")
 
-            moving_reward_avg = MovingAverage(
-                num_datapoints=10 * self.config.num_workers
-            )
+            max_reward = MaxReward()
+            min_reward = MinReward(history_size=10 * self.config.num_workers)
+            avg_reward = MovingAverageReward(num_datapoints=10 * self.config.num_workers)
             loop = GameLoop(
-                self.config, train_env, agent, reward_tracker=moving_reward_avg
+                self.config, train_env, agent, reward_trackers=[max_reward, avg_reward, min_reward]
             )
 
             log.info(f"Run {self.config.num_iters} iters.")
@@ -61,10 +60,11 @@ class Objective:
             for iter in tqdm(range(self.config.num_iters)):  # type: ignore
                 loop.run_train_iter()
                 self.maybe_save_model(iter, agent)
-                avg_reward = moving_reward_avg.get_value()
-                mlflow.log_metric("avg_reward", avg_reward, step=iter)
-                trial.report(avg_reward, iter)
+                mlflow.log_metric("min_reward", min_reward.get_value(), step=iter)
+                mlflow.log_metric("max_reward", max_reward.get_value(), step=iter)
+                mlflow.log_metric("avg_reward", avg_reward.get_value(), step=iter)
+                trial.report(max_reward.get_value(), iter)
                 if trial.should_prune():
                     raise optuna.TrialPruned()
 
-        return moving_reward_avg.get_value()
+        return max_reward.get_value()

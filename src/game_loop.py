@@ -1,12 +1,13 @@
 import time
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
+import mlflow
 import numpy as np
 from gym import Env
 from omegaconf import DictConfig
 
-from src.agents import Agent
-from src.moving_average import MovingAverage
+from .agents import Agent
+from .reward_trackers import RewardTracker
 
 
 class GameLoop:
@@ -15,12 +16,14 @@ class GameLoop:
         config: DictConfig,
         environment: Env,
         agent: Agent,
-        reward_tracker: Optional[MovingAverage] = None,
+        reward_trackers: List[RewardTracker] = [],
     ) -> None:
         self.env = environment
         self.agent = agent
         self.steps_per_iter = config.steps_per_iter
-        self.reward_tracker = reward_tracker
+        self.reward_trackers = reward_trackers
+
+        self.total_episodes_finished = 0
 
         self.reset()
 
@@ -29,8 +32,14 @@ class GameLoop:
 
     def log_stats(self, metrics: Dict) -> None:
         reward = metrics["episode"]["r"]
-        if self.reward_tracker:
-            self.reward_tracker.record_data(reward)
+        for tracker in self.reward_trackers:
+            tracker.record_reward(reward)
+
+        mlflow.log_metric("episode_reward", reward, step=self.total_episodes_finished)
+        mlflow.log_metric("episode_length", metrics["episode"]["l"], step=self.total_episodes_finished)
+        mlflow.log_metric("episode_x_pos", metrics["x_pos"], step=self.total_episodes_finished)
+
+        self.total_episodes_finished += 1
 
     def run_single_step(self, train: bool = True) -> bool:
         """
@@ -61,5 +70,5 @@ class GameLoop:
         assert self.agent.num_workers == 1
         while True:
             if self.run_single_step(train=False):
-                break
+                self.reset()
             time.sleep(1 / 60)

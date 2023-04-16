@@ -3,8 +3,7 @@ import logging
 import mlflow
 
 log = logging.getLogger(__name__)
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import numpy.typing as npt
@@ -27,14 +26,14 @@ class PPOAgent(Agent):
         super().__init__(*args, **kwargs)
         if self.trial:
             self.gae_estimator = GaeEstimator(
-                gamma=self.trial.suggest_float("gamma", 0.9, 1.0),
-                tau=self.trial.suggest_float("tau", 0.9, 1.0),
+                gamma=self.config.gamma,
+                tau=self.config.tau,
             )
             self.critic_loss_weight = self.trial.suggest_float(
                 "critic_loss_weight", 0.5, 1.5
             )
             self.entropy_loss_weight = self.trial.suggest_loguniform(
-                "entropy_loss_weight", 1e-03, 1e-01
+                "entropy_loss_weight", 1e-04, 1e-02
             )
             lr = self.trial.suggest_loguniform("learning_rate", 1e-05, 1e-03)
         else:
@@ -85,6 +84,8 @@ class PPOAgent(Agent):
             **OmegaConf.to_container(self.config.learning_rate.config, resolve=True),
         )
 
+        self.update_step = 0
+
     def get_state_dicts(self) -> Dict[str, dict]:
         return {
             "actor_critic": self.actor_critic.state_dict(),
@@ -106,10 +107,7 @@ class PPOAgent(Agent):
             logits, values = self._compute_logits_values(train)
 
             action_dist = torch.distributions.Categorical(logits=logits)
-            if train:
-                actions = action_dist.sample()
-            else:
-                actions = torch.argmax(logits, dim=-1)
+            actions = action_dist.sample()
             log_probs = action_dist.log_prob(actions)
         self.experience_buffer.buffer_values(values)
         self.experience_buffer.buffer_log_probs(log_probs)
@@ -215,14 +213,14 @@ class PPOAgent(Agent):
         b_returns: torch.Tensor,
         b_values: torch.Tensor,
     ) -> torch.Tensor:
-        crit_loss = torch.nn.functional.smooth_l1_loss(b_returns, new_values)
+        crit_loss = 0.5 * torch.nn.functional.mse_loss(b_returns, new_values, reduce=False)
         if self.clip_value:
             v_clip = torch.clip(
                 new_values,
                 min=b_values - self.clip_param,
                 max=b_values + self.clip_param,
             )
-            crit_loss_2 = torch.nn.functional.smooth_l1_loss(b_returns, v_clip)
+            crit_loss_2 = 0.5 * torch.nn.functional.mse_loss(b_returns, v_clip, reduce=False)
             crit_loss = torch.maximum(crit_loss, crit_loss_2)
         crit_loss = torch.mean(crit_loss)
 
@@ -292,6 +290,9 @@ class PPOAgent(Agent):
             losses[key] /= len(dataloader) * self.epochs_per_update
         log.debug(f"Update finished. Losses: {losses}")
         self.scheduler.step()
+
+        mlflow.log_metrics(losses, self.update_step)
+        self.update_step += 1
 
         self.experience_buffer.reset()
 

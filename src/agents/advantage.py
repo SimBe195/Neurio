@@ -8,7 +8,6 @@ import torch
 class GaeEstimator:
     gamma: float
     tau: float
-    normalize: bool = False
 
     def get_advantage_returns(
         self,
@@ -32,12 +31,9 @@ class GaeEstimator:
         advantages = torch.zeros_like(rewards)
         gae = 0
         for t in reversed(range(len(rewards))):
-            gae = deltas[t] + self.gamma * self.tau * gae
+            gae = deltas[t] + self.gamma * self.tau * (1 - dones[t]) * gae
 
             advantages[t] = gae
-
-        if self.normalize:
-            advantages = (advantages - torch.mean(advantages)) / torch.std(advantages)
 
         returns = advantages + values[:-1]
 

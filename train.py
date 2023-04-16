@@ -2,14 +2,13 @@ import logging
 
 import hydra
 import mlflow
-import optuna
 from omegaconf import DictConfig
 from tqdm import tqdm
 
-from src.agents import Agent, get_agent_class
+from src.agents import get_agent_class
 from src.environment import get_env_info, get_multiprocess_environment
 from src.game_loop import GameLoop
-from src.moving_average import MovingAverage
+from src.reward_trackers import MaxReward, MinReward, MovingAverageReward
 
 log = logging.getLogger(__name__)
 
@@ -42,21 +41,21 @@ def main(config: DictConfig) -> None:
         # Run game loop
         log.info(f"Train on level {level}")
 
-        moving_reward_avg = MovingAverage(
-            num_datapoints=10 * config.num_workers
-        )
+        max_reward = MaxReward()
+        min_reward = MinReward(history_size=10 * config.num_workers)
+        avg_reward = MovingAverageReward(num_datapoints=10 * config.num_workers)
         loop = GameLoop(
-            config, train_env, agent, reward_tracker=moving_reward_avg
+            config, train_env, agent, reward_trackers=[min_reward, max_reward, avg_reward]
         )
 
         log.info(f"Run {config.num_iters} iters.")
-        mlflow.log_params(dict(config))
         for iter in tqdm(range(config.num_iters)):  # type: ignore
             loop.run_train_iter()
             if iter % config.save_frequency == 0:
                 agent.save(iter)
-            avg_reward = moving_reward_avg.get_value()
-            mlflow.log_metric("avg_reward", avg_reward, step=iter)
+            mlflow.log_metric("min_reward", min_reward.get_value(), step=iter)
+            mlflow.log_metric("max_reward", max_reward.get_value(), step=iter)
+            mlflow.log_metric("avg_reward", avg_reward.get_value(), step=iter)
         agent.save(config.num_iters)
 
 
