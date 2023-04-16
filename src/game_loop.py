@@ -1,12 +1,12 @@
-from typing import Optional
+import time
+from typing import Dict, Optional
 
 import numpy as np
 from gym import Env
 from omegaconf import DictConfig
-from tqdm import tqdm
 
 from src.agents import Agent
-from src.summary import Summary
+from src.moving_average import MovingAverage
 
 
 class GameLoop:
@@ -15,61 +15,51 @@ class GameLoop:
         config: DictConfig,
         environment: Env,
         agent: Agent,
-        summary: Optional[Summary] = None,
+        reward_tracker: Optional[MovingAverage] = None,
     ) -> None:
         self.env = environment
         self.agent = agent
-        self.summary = summary
-
         self.steps_per_iter = config.steps_per_iter
-        self.current_states = [None] * self.agent.num_workers
+        self.reward_tracker = reward_tracker
+
+        self.reset()
 
     def reset(self) -> None:
         self.current_states, _ = self.env.reset()
 
-    def run(
-        self,
-        num_iters: int = 1,
-        train: bool = True,
-    ) -> None:
-        self.reset()
+    def log_stats(self, metrics: Dict) -> None:
+        reward = metrics["episode"]["r"]
+        if self.reward_tracker:
+            self.reward_tracker.record_data(reward)
 
-        if train:
-            steps_per_iter = self.steps_per_iter
-        else:
-            assert self.agent.num_workers == 1
-            steps_per_iter = 1_000_000
+    def run_single_step(self, train: bool = True) -> bool:
+        """
+        Run single step for each agent.
 
-        for _ in tqdm(range(num_iters)):
-            for _ in range(steps_per_iter):
-                self.agent.feed_observation(self.current_states)  # type: ignore
-                actions, _ = self.agent.next_actions(train)
-                states, rewards, terminateds, truncateds, metrics = self.env.step(
-                    actions
-                )
-                self.current_states = states
+        :returns: True if all agents are done.
+        """
+        self.agent.feed_observation(self.current_states)  # type: ignore
+        actions, _ = self.agent.next_actions(train)
+        states, rewards, terminateds, truncateds, metrics = self.env.step(actions)
+        self.current_states = states
+        dones = np.logical_or(terminateds, truncateds)
 
-                dones = np.logical_or(terminateds, truncateds)
+        self.agent.give_reward(rewards, dones)
 
-                self.agent.give_reward(rewards, dones)
+        if "final_info" in metrics:
+            for w in [w for w, done in enumerate(dones) if done]:
+                self.log_stats(metrics["final_info"][w])
 
-                for w in range(self.agent.num_workers):
-                    if dones[w] and self.summary:
-                        self.summary.log_episode_stat(
-                            metrics["final_info"][w]["episode"]["l"],
-                            "performance/steps",
-                        )
-                        self.summary.log_episode_stat(
-                            metrics["final_info"][w]["episode"]["r"],
-                            "performance/reward",
-                        )
-                        self.summary.log_episode_stat(
-                            metrics["final_info"][w]["x_pos"],
-                            "performance/distance",
-                        )
-                        self.summary.next_episode()
-                if not train and dones[0]:
-                    break
+        return all(dones)
 
-            if train:
-                self.agent.update()
+    def run_train_iter(self):
+        for _ in range(self.steps_per_iter):
+            self.run_single_step(train=True)
+        self.agent.update()
+
+    def run_test_loop(self):
+        assert self.agent.num_workers == 1
+        while True:
+            if self.run_single_step(train=False):
+                break
+            time.sleep(1 / 60)

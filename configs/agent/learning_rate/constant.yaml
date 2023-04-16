@@ -1,5 +1,5 @@
 class_name: ConstantLR
-learning_rate: 4e-04
+learning_rate: 5.5e-04
 config:
   factor: 1
   total_iters: 0

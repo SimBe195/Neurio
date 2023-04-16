@@ -4,18 +4,20 @@ import torch
 
 
 class ExperienceBuffer:
-    def __init__(self, num_workers: int) -> None:
+    def __init__(self, num_workers: int, device: torch.device) -> None:
         self.num_workers = num_workers
 
         self.states: List[torch.Tensor] = []
         self.actions: List[torch.Tensor] = []
         self.prev_actions: List[torch.Tensor] = [
-            torch.zeros(size=(self.num_workers,), dtype=torch.int64)
+            torch.zeros(size=(self.num_workers,), dtype=torch.int64, device=device)
         ]
         self.values: List[torch.Tensor] = []
         self.rewards: List[torch.Tensor] = []
         self.dones: List[torch.Tensor] = []
         self.log_probs: List[torch.Tensor] = []
+
+        self.device = device
 
     def buffer_states(self, states: torch.Tensor) -> None:
         assert states.dim() == 4
@@ -57,7 +59,9 @@ class ExperienceBuffer:
         self.states = []
         if forget_prev_action:
             self.prev_actions = [
-                torch.zeros(size=(self.num_workers,), dtype=torch.int64)
+                torch.zeros(
+                    size=(self.num_workers,), dtype=torch.int64, device=self.device
+                )
             ]
         else:
             self.prev_actions = self.prev_actions[-1:]

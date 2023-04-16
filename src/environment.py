@@ -1,4 +1,5 @@
 import logging
+from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple
 
 import cv2
@@ -8,6 +9,7 @@ from gym.vector import AsyncVectorEnv
 from gym.wrappers.frame_stack import FrameStack
 from gym.wrappers.gray_scale_observation import GrayScaleObservation
 from gym.wrappers.record_episode_statistics import RecordEpisodeStatistics
+from gym.wrappers.time_limit import TimeLimit
 
 gym.logger.set_level(logging.ERROR)
 import gym_super_mario_bros
@@ -121,12 +123,8 @@ class ActionRepeatWrapper(Wrapper):
 
 
 class CustomRewardWrapper(Wrapper):
-    def __init__(self, config: DictConfig, *args, **kwargs) -> None:
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.score_reward_weight = config.score_reward_weight
-        self.death_penalty = config.death_penalty
-        self.level_finish_reward = config.level_finish_reward
-
         self.curr_score = 0
 
     def reset(self) -> Tuple[npt.NDArray, dict]:
@@ -142,15 +140,15 @@ class CustomRewardWrapper(Wrapper):
         score_diff = next_score - self.curr_score
         self.curr_score = next_score
 
-        reward += self.score_reward_weight * score_diff
+        reward += score_diff / 40
 
         if terminated or truncated:
             if info["flag_get"]:
-                reward += self.level_finish_reward
+                reward += 50
             else:
-                reward -= self.death_penalty
+                reward -= 50
 
-        reward /= 10.0
+        reward /= 10
 
         return state, reward, terminated, truncated, info
 
@@ -181,8 +179,9 @@ def get_environment(
         env = GrayScaleObservation(env, keep_dim=True)
     env = ClipWrapper(config, env)
     env = SubsampleWrapper(config, env)
-    env = CustomRewardWrapper(config.reward, env)
+    env = CustomRewardWrapper(env)
     env = ActionRepeatWrapper(config.num_repeat_frames, env)
+    # env = TimeLimit(env, max_episode_steps=config.max_episode_steps)
     env = FrameStack(env, config.num_stack_frames)
     env = RecordEpisodeStatistics(env)
     return env
@@ -202,38 +201,43 @@ def get_multiprocess_environment(num_environments: int, *args, **kwargs) -> Env:
     )
 
 
-def get_stack_frames(env: Env) -> int:
+@dataclass
+class EnvironmentInfo:
+    width: int
+    height: int
+    stack_frames: int
+    image_channels: int
+    num_actions: int
+    num_workers: int
+
+    @property
+    def total_channel_dim(self):
+        return self.stack_frames * self.image_channels
+
+
+def get_env_info(env: Env) -> EnvironmentInfo:
     obs_space = env.observation_space.shape
     assert obs_space is not None
+    assert len(obs_space) >= 3
+
+    height, width, channels = obs_space[-3:]
     if len(obs_space) >= 4:
-        return obs_space[-4]
-    return 1
+        stack_frames = obs_space[-4]
+    else:
+        stack_frames = 1
 
-
-def get_height(env: Env) -> int:
-    obs_space = env.observation_space.shape
-    assert obs_space is not None
-    assert len(obs_space) >= 3
-    return obs_space[-3]
-
-
-def get_width(env: Env) -> int:
-    obs_space = env.observation_space.shape
-    assert obs_space is not None
-    assert len(obs_space) >= 3
-    return obs_space[-2]
-
-
-def get_channels(env: Env) -> int:
-    obs_space = env.observation_space.shape
-    assert obs_space is not None
-    assert len(obs_space) >= 3
-    return obs_space[-1]
-
-
-def get_num_actions(env: Env) -> int:
     act_space = env.action_space
     if isinstance(act_space, Discrete):
-        return act_space.n
-    assert isinstance(act_space, MultiDiscrete)
-    return act_space.nvec[0]
+        num_actions = act_space.n
+    else:
+        assert isinstance(act_space, MultiDiscrete)
+        num_actions = act_space.nvec[0]
+
+    if isinstance(env, AsyncVectorEnv):
+        num_workers = env.num_envs
+    else:
+        num_workers = 1
+
+    return EnvironmentInfo(
+        width, height, stack_frames, channels, num_actions, num_workers
+    )

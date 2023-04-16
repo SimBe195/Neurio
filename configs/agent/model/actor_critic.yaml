@@ -2,10 +2,6 @@ defaults:
   - encoder: conv_encoder
   - _self_
 
-actor_fc_size: 512
-
-critic_fc_size: 512
-
 action_embedding_size: 128
 
 description: "enc-${agent.model.encoder.description}_act-${agent.model.actor_fc_size}_crit-${agent.model.critic_fc_size}"

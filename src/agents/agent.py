@@ -1,38 +1,30 @@
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy.typing as npt
+import optuna
+import torch
 from omegaconf import DictConfig
 
-from src.summary import Summary
+from src.environment import EnvironmentInfo
 
 
 class Agent(ABC):
     def __init__(
         self,
         config: DictConfig,
-        in_width: int,
-        in_height: int,
-        in_stack_frames: int,
-        in_channels: int,
-        num_workers: int,
-        num_actions: int,
-        summary: Optional[Summary] = None,
+        env_info: EnvironmentInfo,
+        trial: Optional[optuna.Trial] = None,
     ) -> None:
         self.config = config
-        self.in_width = in_width
-        self.in_height = in_height
-        self.in_stack_frames = in_stack_frames
-        self.in_channels = in_channels
-        self.num_workers = num_workers
-        self.num_actions = num_actions
-        self.summary = summary
+        self.env_info = env_info
+        self.trial = trial
 
-    def save(self, path: Path) -> None:
+    def save(self, iter: int) -> None:
         pass
 
-    def load(self, path: Optional[Path] = None) -> None:
+    def load(self, iter: int) -> None:
         pass
 
     def feed_observation(self, state: npt.NDArray) -> None:
@@ -41,8 +33,15 @@ class Agent(ABC):
     def update(self) -> None:
         pass
 
+    @property
+    def num_workers(self) -> int:
+        return self.env_info.num_workers
+
     @abstractmethod
     def next_actions(self, train: bool = True) -> Tuple[List[int], List[float]]:
+        """
+        Gets indices and log probabilities of the next actions for each worker.
+        """
         pass
 
     def reset(self) -> None:
@@ -50,6 +49,3 @@ class Agent(ABC):
 
     def give_reward(self, reward: float, done: bool = False) -> None:
         pass
-
-    def set_num_workers(self, num_workers: int) -> None:
-        self.num_workers = num_workers

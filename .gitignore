@@ -1,7 +1,8 @@
 __pychache__/
 *.py[cod]
 .vscode/
+.hypothesis/
 outputs/
-logs/
-models/
+mlruns/
+optuna_studies/
 recordings/

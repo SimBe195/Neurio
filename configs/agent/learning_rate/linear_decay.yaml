@@ -1,8 +1,8 @@
 class_name: LinearLR
-learning_rate: 5e-04
+learning_rate: 5.5e-04
 config:
   start_factor: 1.0
-  end_factor: 0.2
-  total_iters: 2000
+  end_factor: 0.0
+  total_iters: 2500
 
 description: "lin-dec-${agent.learning_rate.learning_rate}"
