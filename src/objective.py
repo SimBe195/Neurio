@@ -49,22 +49,25 @@ class Objective:
             log.info(f"Train on level {level}")
 
             max_reward = MaxReward()
-            min_reward = MinReward(history_size=10 * self.config.num_workers)
-            avg_reward = MovingAverageReward(num_datapoints=10 * self.config.num_workers)
+            min_reward = MinReward()
+            avg_reward = MovingAverageReward()
             loop = GameLoop(
                 self.config, train_env, agent, reward_trackers=[max_reward, avg_reward, min_reward]
             )
 
             log.info(f"Run {self.config.num_iters} iters.")
             mlflow.log_params(trial.params)
-            for iter in tqdm(range(self.config.num_iters)):  # type: ignore
+
+            best_reward_avg = 0
+            for iter in tqdm(range(1, self.config.num_iters + 1)):  # type: ignore
                 loop.run_train_iter()
                 self.maybe_save_model(iter, agent)
                 mlflow.log_metric("min_reward", min_reward.get_value(), step=iter)
                 mlflow.log_metric("max_reward", max_reward.get_value(), step=iter)
                 mlflow.log_metric("avg_reward", avg_reward.get_value(), step=iter)
-                trial.report(max_reward.get_value(), iter)
+                best_reward_avg = max(best_reward_avg, avg_reward.get_value())
+                trial.report(best_reward_avg, iter)
                 if trial.should_prune():
                     raise optuna.TrialPruned()
 
-        return max_reward.get_value()
+        return best_reward_avg

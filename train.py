@@ -42,8 +42,8 @@ def main(config: DictConfig) -> None:
         log.info(f"Train on level {level}")
 
         max_reward = MaxReward()
-        min_reward = MinReward(history_size=10 * config.num_workers)
-        avg_reward = MovingAverageReward(num_datapoints=10 * config.num_workers)
+        min_reward = MinReward()
+        avg_reward = MovingAverageReward()
         loop = GameLoop(
             config, train_env, agent, reward_trackers=[min_reward, max_reward, avg_reward]
         )
