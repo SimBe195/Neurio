@@ -3,7 +3,8 @@ defaults:
   - learning_rate: linear_decay
   - _self_
 
-name: ppo
+_target_: src.config.agent.PPOAgentConfig
+
 gamma: 0.99
 tau: 0.95
 epochs_per_update: 4
@@ -13,5 +14,3 @@ clip_value: False
 critic_loss_weight: 0.5
 entropy_loss_weight: 0.001
 grad_clip_norm: 0.5
-
-description: "lr-${agent.learning_rate.description}_model-${agent.model.description}"

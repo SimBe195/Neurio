@@ -1,3 +1,5 @@
+_target_: src.config.environment.EnvironmentConfig
+
 env_name: SuperMarioBros-v0
 complex_movement: True
 num_repeat_frames: 4
@@ -7,7 +9,4 @@ clip_bot: 0
 clip_left: 0
 clip_right: 0
 subsampling_factor: 1
-max_episode_steps: 200
 grayscale: True
-
-description: "base-env"

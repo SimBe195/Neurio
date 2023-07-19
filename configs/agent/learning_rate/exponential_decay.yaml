@@ -1,6 +1,4 @@
-class_name: ExponentialDecay
-learning_rate: 5.5e-04
-config:
-  gamma: 0.99
+_target_: src.config.learning_rate.ExponentialDecayLRConfig
 
-description: "exp-dec-${agent.learning_rate.config.initial_learning_rate}"
+learning_rate: 5.5e-04
+decay_factor: 0.999

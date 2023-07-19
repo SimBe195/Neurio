@@ -1,6 +1,0 @@
-num_filters: [32, 32, 32, 32]
-kernel_size: 3
-stride: 2
-fc_size: 512
-
-description: "conv-enc"

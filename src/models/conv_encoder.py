@@ -1,9 +1,8 @@
-from typing import Optional
+from typing import List, Optional
 
 import optuna
 import torch
 import torch.nn as nn
-from omegaconf import DictConfig, ListConfig
 
 from src.environment import EnvironmentInfo
 
@@ -12,28 +11,12 @@ class ConvEncoder(nn.Module):
     def __init__(
         self,
         env_info: EnvironmentInfo,
-        config: DictConfig,
-        trial: Optional[optuna.Trial] = None,
+        num_filters: List[int],
+        kernel_sizes: List[int],
+        strides: List[int],
+        fc_size: int,
     ) -> None:
         super().__init__()
-
-        if trial:
-            layers = 4
-            num_filters = []
-            for idx in range(layers):
-                filter_size = trial.suggest_categorical(
-                    f"conv_filter_size_{idx}", [32, 64]
-                )
-                num_filters.append(filter_size)
-
-            fc_size = trial.suggest_int("conv_fc_size", 400, 600)
-        else:
-            assert isinstance(config.num_filters, ListConfig)
-            num_filters = config.num_filters
-            fc_size = config.fc_size
-
-        kernel_sizes = [config.kernel_size] * len(num_filters)
-        strides = [config.stride] * len(num_filters)
 
         self.conv_layers = nn.ModuleList()
         prev_filters = env_info.total_channel_dim

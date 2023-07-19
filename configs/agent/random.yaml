@@ -1,3 +1,1 @@
-name: random
-
-description: "random-agent"
+_target_: src.config.agent.RandomAgentConfig

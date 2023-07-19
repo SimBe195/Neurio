@@ -1,6 +1,9 @@
 import logging
 
 import mlflow
+import torchinfo
+
+from src.config.agent import PPOAgentConfig
 
 log = logging.getLogger(__name__)
 from typing import Dict, List, Tuple
@@ -8,13 +11,13 @@ from typing import Dict, List, Tuple
 import numpy as np
 import numpy.typing as npt
 import torch
-from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, TensorDataset
 
-from src.agents import Agent
-from src.agents.advantage import GaeEstimator
-from src.agents.experience_buffer import ExperienceBuffer
-from src.models.actor_critic import ActorCritic
+from src.models import get_model
+
+from .advantage import GaeEstimator
+from .agent import Agent
+from .experience_buffer import ExperienceBuffer
 
 
 class PPOAgent(Agent):
@@ -24,28 +27,15 @@ class PPOAgent(Agent):
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
-        if self.trial:
-            self.gae_estimator = GaeEstimator(
-                gamma=self.config.gamma,
-                tau=self.config.tau,
-            )
-            self.critic_loss_weight = self.trial.suggest_float(
-                "critic_loss_weight", 0.5, 1.5
-            )
-            self.entropy_loss_weight = self.trial.suggest_loguniform(
-                "entropy_loss_weight", 1e-04, 1e-02
-            )
-            lr = self.trial.suggest_loguniform("learning_rate", 1e-05, 1e-03)
-        else:
-            self.gamma: float = self.config.gamma
-            self.tau: float = self.config.tau
-            self.gae_estimator = GaeEstimator(
-                gamma=self.config.gamma,
-                tau=self.config.tau,
-            )
-            self.critic_loss_weight: float = self.config.critic_loss_weight
-            self.entropy_loss_weight: float = self.config.entropy_loss_weight
-            lr = self.config.learning_rate.learning_rate
+        assert isinstance(self.config, PPOAgentConfig)
+
+        self.gae_estimator = GaeEstimator(
+            gamma=self.config.gamma,
+            tau=self.config.tau,
+        )
+        self.critic_loss_weight = self.config.critic_loss_weight
+        self.entropy_loss_weight = self.config.entropy_loss_weight
+        lr = self.config.learning_rate.learning_rate
 
         self.batch_size: int = self.config.batch_size
         self.grad_clip_norm: float = self.config.grad_clip_norm
@@ -56,33 +46,51 @@ class PPOAgent(Agent):
 
         self.cpu = torch.device("cpu")
         if torch.cuda.is_available():
-            self.gpu = torch.device("cuda")
-            device_name = torch.cuda.get_device_name(self.gpu)
+            self.device = torch.device("cuda")
+            device_name = torch.cuda.get_device_name(self.device)
             log.info(f"Using GPU {device_name}")
         else:
-            self.gpu = self.cpu
+            self.device = self.cpu
             device_name = torch.cuda.get_device_name(self.cpu)
             log.info(f"Using CPU {device_name}")
 
-        self.experience_buffer = ExperienceBuffer(self.num_workers, device=self.gpu)
+        self.experience_buffer = ExperienceBuffer(self.num_workers, device=self.device)
 
-        self.actor_critic = ActorCritic(
-            self.env_info,
-            config=self.config.model,
-            trial=self.trial,
-        ).to(self.gpu)
+        self.actor_critic = get_model(
+            config=self.config.model, env_info=self.env_info
+        ).to(self.device)
+
+        mlflow.log_text(
+            str(
+                torchinfo.summary(
+                    self.actor_critic,
+                    input_size=[
+                        (
+                            self.batch_size,
+                            self.env_info.total_channel_dim,
+                            self.env_info.width,
+                            self.env_info.height,
+                        ),
+                        (self.batch_size,),
+                    ],
+                    dtypes=[torch.float32, torch.int32],
+                    col_names=[
+                        "output_size",
+                        "kernel_size",
+                        "num_params",
+                        "params_percent",
+                    ],
+                )
+            ),
+            artifact_file="torchinfo_summary",
+        )
 
         self.opt = torch.optim.Adam(
             params=self.actor_critic.parameters(),
             lr=lr,
         )
 
-        self.scheduler: torch.optim.lr_scheduler.LRScheduler = getattr(
-            torch.optim.lr_scheduler, self.config.learning_rate.class_name
-        )(
-            self.opt,
-            **OmegaConf.to_container(self.config.learning_rate.config, resolve=True),
-        )
+        self.scheduler = self.config.learning_rate.create_scheduler(self.opt)
 
         self.update_step = 0
 
@@ -117,8 +125,8 @@ class PPOAgent(Agent):
         ]
 
     def give_reward(self, reward: List[float], done: List[bool]) -> None:
-        self.experience_buffer.buffer_rewards(torch.tensor(reward, device=self.gpu))
-        self.experience_buffer.buffer_dones(torch.tensor(done, device=self.gpu))
+        self.experience_buffer.buffer_rewards(torch.tensor(reward, device=self.device))
+        self.experience_buffer.buffer_dones(torch.tensor(done, device=self.device))
 
     def reset(self) -> None:
         self.experience_buffer.reset()
@@ -213,14 +221,18 @@ class PPOAgent(Agent):
         b_returns: torch.Tensor,
         b_values: torch.Tensor,
     ) -> torch.Tensor:
-        crit_loss = 0.5 * torch.nn.functional.mse_loss(b_returns, new_values, reduce=False)
+        crit_loss = 0.5 * torch.nn.functional.mse_loss(
+            b_returns, new_values, reduce=False
+        )
         if self.clip_value:
             v_clip = torch.clip(
                 new_values,
                 min=b_values - self.clip_param,
                 max=b_values + self.clip_param,
             )
-            crit_loss_2 = 0.5 * torch.nn.functional.mse_loss(b_returns, v_clip, reduce=False)
+            crit_loss_2 = 0.5 * torch.nn.functional.mse_loss(
+                b_returns, v_clip, reduce=False
+            )
             crit_loss = torch.maximum(crit_loss, crit_loss_2)
         crit_loss = torch.mean(crit_loss)
 
@@ -299,7 +311,7 @@ class PPOAgent(Agent):
     def feed_observation(self, state: npt.NDArray) -> None:
         # State has shape (<num_workers>, <num_stack_frames>, <height>, <width>, <num_channels>)
         # Convert to shape (<num_workers>, <num_stack_frames> * <num_channels>, <height>, <width>)
-        state_tensor = torch.tensor(np.array(state), device=self.gpu)
+        state_tensor = torch.tensor(np.array(state), device=self.device)
         state_tensor = torch.concat(torch.unbind(state_tensor, dim=1), dim=-1)
         state_tensor = torch.moveaxis(state_tensor, -1, 1)
         self.experience_buffer.buffer_states(state_tensor)

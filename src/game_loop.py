@@ -1,10 +1,9 @@
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 import mlflow
 import numpy as np
 from gym import Env
-from omegaconf import DictConfig
 
 from .agents import Agent
 from .reward_trackers import RewardTracker
@@ -13,14 +12,12 @@ from .reward_trackers import RewardTracker
 class GameLoop:
     def __init__(
         self,
-        config: DictConfig,
         environment: Env,
         agent: Agent,
         reward_trackers: List[RewardTracker] = [],
     ) -> None:
         self.env = environment
         self.agent = agent
-        self.steps_per_iter = config.steps_per_iter
         self.reward_trackers = reward_trackers
 
         self.total_episodes_finished = 0
@@ -36,8 +33,12 @@ class GameLoop:
             tracker.record_reward(reward)
 
         mlflow.log_metric("episode_reward", reward, step=self.total_episodes_finished)
-        mlflow.log_metric("episode_length", metrics["episode"]["l"], step=self.total_episodes_finished)
-        mlflow.log_metric("episode_x_pos", metrics["x_pos"], step=self.total_episodes_finished)
+        mlflow.log_metric(
+            "episode_length", metrics["episode"]["l"], step=self.total_episodes_finished
+        )
+        mlflow.log_metric(
+            "episode_x_pos", metrics["x_pos"], step=self.total_episodes_finished
+        )
 
         self.total_episodes_finished += 1
 
@@ -61,8 +62,8 @@ class GameLoop:
 
         return all(dones)
 
-    def run_train_iter(self):
-        for _ in range(self.steps_per_iter):
+    def run_train_iter(self, steps: int):
+        for _ in range(steps):
             self.run_single_step(train=True)
         self.agent.update()
 

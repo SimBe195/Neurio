@@ -2,7 +2,7 @@ from typing import List, Tuple
 
 import numpy as np
 
-from src.agents import Agent
+from .agent import Agent
 
 
 class RandomAgent(Agent):

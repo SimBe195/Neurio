@@ -1,23 +1,20 @@
 from abc import ABC, abstractmethod
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 import numpy.typing as npt
-import optuna
-from omegaconf import DictConfig
 
+from src.config.agent import AgentConfig
 from src.environment import EnvironmentInfo
 
 
 class Agent(ABC):
     def __init__(
         self,
-        config: DictConfig,
+        config: AgentConfig,
         env_info: EnvironmentInfo,
-        trial: Optional[optuna.Trial] = None,
     ) -> None:
         self.config = config
         self.env_info = env_info
-        self.trial = trial
 
     def save(self, iter: int) -> None:
         pass

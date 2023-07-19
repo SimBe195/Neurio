@@ -1,14 +1,16 @@
-from typing import Type
+from src.config.agent import AgentConfig, PPOAgentConfig, RandomAgentConfig
+from src.environment import EnvironmentInfo
 
-from omegaconf import DictConfig
+from .advantage import *
+from .agent import *
+from .experience_buffer import *
+from .ppo_agent import *
+from .random_agent import *
 
-from .agent import Agent
-from .ppo_agent import PPOAgent
-from .random_agent import RandomAgent
 
-
-def get_agent_class(config: DictConfig) -> Type[Agent]:
-    return {
-        "random": RandomAgent,
-        "ppo": PPOAgent,
-    }[config.name]
+def get_agent(config: AgentConfig, env_info: EnvironmentInfo) -> Agent:
+    if isinstance(config, RandomAgentConfig):
+        return RandomAgent(config, env_info)
+    if isinstance(config, PPOAgentConfig):
+        return PPOAgent(config, env_info)
+    raise NotImplementedError

@@ -1,7 +1,8 @@
-defaults:
-  - encoder: conv_encoder
-  - _self_
+_target_: src.config.model.ActorCriticConfig
 
 action_embedding_size: 128
-
-description: "enc-${agent.model.encoder.description}"
+num_layers: 4
+num_filters: 32
+kernel_size: 3
+stride: 2
+fc_size: 512

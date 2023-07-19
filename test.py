@@ -1,22 +1,30 @@
+import argparse
 import logging
 
 import hydra
 import mlflow
+
+from config.main_config import NeurioConfig
 
 logging.basicConfig(level=logging.INFO)
 
 log = logging.getLogger(__name__)
 
 import optuna
-from omegaconf import DictConfig
 
-from src.agents import get_agent_class
+from src.agents import get_agent
 from src.environment import get_env_info, get_singleprocess_environment
 from src.game_loop import GameLoop
 
 
 @hydra.main(version_base="1.3", config_path="configs", config_name="config")
-def main(config: DictConfig) -> None:
+def main(config: NeurioConfig) -> None:
+    parser = argparse.ArgumentParser(description="Run test for model.")
+    parser.add_argument("--trial", type=int, help="Number of test trial to load.")
+    parser.add_argument("--iter", type=int, help="Number of test iter to load.")
+
+    args = parser.parse_args()
+
     study_name = f"Neurio-lev-{config.level}"
 
     study = optuna.load_study(
@@ -24,19 +32,17 @@ def main(config: DictConfig) -> None:
         storage=f"sqlite:///optuna_studies/{study_name}.db",
     )
 
-    trial = study.get_trials()[config.test_trial]
+    trial = study.get_trials()[args.trial]
 
     level = config.level
 
     # Create env
     env = get_singleprocess_environment(
-        config=config.environment,
-        level=level,
-        render_mode="human",
+        config=config.environment, level=level, render_mode="human"
     )
 
     # Set up agent
-    agent = get_agent_class(config.agent)(config.agent, get_env_info(env), trial)
+    agent = get_agent(config.agent, get_env_info(env))
 
     runs = mlflow.search_runs(
         experiment_names=[study_name],
@@ -53,10 +59,10 @@ def main(config: DictConfig) -> None:
         # Load checkpoint
         log.info(f"Eval trained model on level {level}.")
 
-        log.info(f"Loading checkpoint at iter {config.test_iter}.")
-        agent.load(config.test_iter)
+        log.info(f"Loading checkpoint at iter {args.iter}.")
+        agent.load(args.iter)
 
-        GameLoop(config, env, agent).run_test_loop()
+        GameLoop(env, agent).run_test_loop()
 
         log.info("Done evaluating. Exiting now.")
 

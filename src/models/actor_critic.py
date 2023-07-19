@@ -1,32 +1,33 @@
-from typing import Optional, Tuple
+from typing import Tuple
 
-import optuna
 import torch
 import torch.nn as nn
-from omegaconf import DictConfig
 
-from src.environment import EnvironmentInfo
+from src.config.model import ActorCriticConfig
 
 from .conv_encoder import ConvEncoder
+from .model import Model
 
 
-class ActorCritic(nn.Module):
-    def __init__(
-        self,
-        env_info: EnvironmentInfo,
-        config: DictConfig,
-        trial: Optional[optuna.Trial] = None,
-    ) -> None:
-        super().__init__()
+class ActorCritic(Model):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        assert isinstance(self.config, ActorCriticConfig)
 
-        self.encoder = ConvEncoder(env_info, config.encoder, trial)
+        self.encoder = ConvEncoder(
+            self.env_info,
+            num_filters=[self.config.num_filters] * self.config.num_layers,
+            kernel_sizes=[self.config.kernel_size] * self.config.num_layers,
+            strides=[self.config.stride] * self.config.num_layers,
+            fc_size=self.config.fc_size,
+        )
         enc_size = self.encoder.out_size
 
-        action_embed_size = config.action_embedding_size
-        self.action_embed = nn.Embedding(env_info.num_actions, action_embed_size)
+        action_embed_size = self.config.action_embedding_size
+        self.action_embed = nn.Embedding(self.env_info.num_actions, action_embed_size)
 
         prev_size = enc_size + action_embed_size
-        self.actor_layer = nn.Linear(prev_size, env_info.num_actions)
+        self.actor_layer = nn.Linear(prev_size, self.env_info.num_actions)
         self.critic_layer = nn.Linear(prev_size, 1)
 
     def _initialize_weights(self):
@@ -39,14 +40,14 @@ class ActorCritic(nn.Module):
         self, x: torch.Tensor, prev_actions: torch.Tensor, training: bool = True
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         x = self.encoder(x)
-        a = self.action_embed.forward(prev_actions)
+        a = self.action_embed(prev_actions)
 
         x_a = torch.concat([x, a], dim=1)
 
-        act = self.actor_layer.forward(x_a)
+        act = self.actor_layer(x_a)
 
         if training:
-            crit = self.critic_layer.forward(x_a)
+            crit = self.critic_layer(x_a)
             crit = torch.squeeze(crit, -1)
         else:
             crit = torch.zeros((x.size(0),), dtype=torch.float32)

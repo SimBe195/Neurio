@@ -4,5 +4,6 @@ __pychache__/
 .hypothesis/
 outputs/
 mlruns/
+multirun/
 optuna_studies/
 recordings/
