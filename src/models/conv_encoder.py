@@ -1,6 +1,5 @@
-from typing import List, Optional
+from typing import List
 
-import optuna
 import torch
 import torch.nn as nn
 

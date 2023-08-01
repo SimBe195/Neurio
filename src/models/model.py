@@ -19,6 +19,6 @@ class Model(torch.nn.Module):
 
     @abstractmethod
     def forward(
-        self, x: torch.Tensor, prev_actions: torch.Tensor, training: bool = True
+        self, x: torch.Tensor, prev_actions: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         ...

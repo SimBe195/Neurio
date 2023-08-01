@@ -28,6 +28,7 @@ class ActorCritic(Model):
 
         prev_size = enc_size + action_embed_size
         self.actor_layer = nn.Linear(prev_size, self.env_info.num_actions)
+        self.actor_softmax = nn.Softmax(dim=1)
         self.critic_layer = nn.Linear(prev_size, 1)
 
     def _initialize_weights(self):
@@ -37,7 +38,7 @@ class ActorCritic(Model):
                 nn.init.constant_(module.bias, 0)  # type: ignore
 
     def forward(
-        self, x: torch.Tensor, prev_actions: torch.Tensor, training: bool = True
+        self, x: torch.Tensor, prev_actions: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         x = self.encoder(x)
         a = self.action_embed(prev_actions)
@@ -45,11 +46,9 @@ class ActorCritic(Model):
         x_a = torch.concat([x, a], dim=1)
 
         act = self.actor_layer(x_a)
+        act = self.actor_softmax(act)
 
-        if training:
-            crit = self.critic_layer(x_a)
-            crit = torch.squeeze(crit, -1)
-        else:
-            crit = torch.zeros((x.size(0),), dtype=torch.float32)
+        crit = self.critic_layer(x_a)
+        crit = torch.squeeze(crit, -1)
 
         return act, crit
