@@ -1,68 +1,75 @@
-import argparse
 import logging
 
 import hydra
 import mlflow
+import pandas
+from hydra.utils import instantiate
 
-from config.main_config import NeurioConfig
+from src.config import NeurioConfig, unflatten
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 
 log = logging.getLogger(__name__)
 
-import optuna
-
 from src.agents import get_agent
-from src.environment import get_env_info, get_singleprocess_environment
+from src.config import update_config_with_dict
+from src.environment import get_env_info, get_multiprocess_environment
 from src.game_loop import GameLoop
 
 
-@hydra.main(version_base="1.3", config_path="configs", config_name="config")
+@hydra.main(version_base="1.3", config_path="configs", config_name="neurio_config")
 def main(config: NeurioConfig) -> None:
-    parser = argparse.ArgumentParser(description="Run test for model.")
-    parser.add_argument("--trial", type=int, help="Number of test trial to load.")
-    parser.add_argument("--iter", type=int, help="Number of test iter to load.")
+    config = instantiate(config)
+    if config.test_run_id is not None:
+        run = mlflow.get_run(config.test_run_id)
+        log.info(f"Loading run with run_id {run.info.run_id}")
+    else:
+        runs_df = mlflow.search_runs(
+            experiment_names=[f"Neurio-lev-{config.level}"],
+            output_format="pandas",
+        )
+        assert isinstance(runs_df, pandas.DataFrame)
+        log.info("Finding best run.")
+        rewards = runs_df["metrics.best_sum_avg_rewards"]
+        run = mlflow.get_run(runs_df.loc[rewards.idxmax()]["run_id"])
+        log.info(
+            f"Loading best run with run_id {run.info.run_id} and metric {rewards.max()}."
+        )
 
-    args = parser.parse_args()
+    with mlflow.start_run(run_id=run.info.run_id):
+        log.info("Update config with run parameters.")
+        run_params = unflatten(run.data.params)
+        run_params.pop("test_iter")
+        update_config_with_dict(config, run_params, log)
 
-    study_name = f"Neurio-lev-{config.level}"
+        log.info("Set num_workers to 1")
+        config.num_workers = 1
 
-    study = optuna.load_study(
-        study_name=study_name,
-        storage=f"sqlite:///optuna_studies/{study_name}.db",
-    )
+        level = config.level
 
-    trial = study.get_trials()[args.trial]
+        # Create env
+        env = get_multiprocess_environment(
+            num_environments=config.num_workers,
+            config=config.environment,
+            level=level,
+            render_mode="human",
+        )
 
-    level = config.level
+        # Set up agent
+        agent = get_agent(config.agent, get_env_info(env))
 
-    # Create env
-    env = get_singleprocess_environment(
-        config=config.environment, level=level, render_mode="human"
-    )
-
-    # Set up agent
-    agent = get_agent(config.agent, get_env_info(env))
-
-    runs = mlflow.search_runs(
-        experiment_names=[study_name],
-        filter_string=f"run_name='trial-{trial.number:04d}'",
-        output_format="list",
-    )
-    assert isinstance(runs, list)
-    if not runs:
-        return
-    run_id = runs[0].info.run_id
-    logging.info(f"Found run with run_id {run_id}")
-
-    with mlflow.start_run(run_id=run_id):
         # Load checkpoint
         log.info(f"Eval trained model on level {level}.")
+        if config.test_iter is not None:
+            log.info(f"Loading checkpoint at iter {config.test_iter}.")
+            agent.load(config.test_iter)
+        else:
+            log.info(f"Loading checkpoint at iter {config.num_iters}.")
+            agent.load(config.num_iters)
 
-        log.info(f"Loading checkpoint at iter {args.iter}.")
-        agent.load(args.iter)
-
-        GameLoop(env, agent).run_test_loop()
+        GameLoop(env, agent).run_test_loop(
+            framerate=60 // config.environment.num_repeat_frames
+        )
 
         log.info("Done evaluating. Exiting now.")
 

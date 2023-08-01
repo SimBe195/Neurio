@@ -33,7 +33,7 @@ class Agent(ABC):
         return self.env_info.num_workers
 
     @abstractmethod
-    def next_actions(self, train: bool = True) -> Tuple[List[int], List[float]]:
+    def next_actions(self) -> Tuple[List[int], List[float]]:
         """
         Gets indices and log probabilities of the next actions for each worker.
         """

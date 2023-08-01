@@ -7,15 +7,18 @@ from hydra.utils import instantiate
 from tqdm import tqdm
 
 from src.agents import get_agent
-from src.config import NeurioConfig
+from src.config import NeurioConfig, flatten
 from src.environment import get_env_info, get_multiprocess_environment
 from src.game_loop import GameLoop
 from src.reward_trackers import (
-    BestMovingAvgReward,
+    BestReward,
     MovingAvgReward,
     MovingMaxReward,
     MovingMinReward,
+    SumReward,
 )
+
+logging.basicConfig(level=logging.INFO)
 
 log = logging.getLogger(__name__)
 
@@ -31,7 +34,7 @@ def main(config: NeurioConfig) -> float:
 
     mlflow.set_tracking_uri(f"file://{hydra.utils.get_original_cwd()}/mlruns")
     with mlflow.start_run(experiment_id=exp_id):
-        mlflow.log_params(asdict(config))
+        mlflow.log_params(flatten(asdict(config)))
         level = config.level
 
         # Create env
@@ -39,7 +42,7 @@ def main(config: NeurioConfig) -> float:
             config.num_workers,
             config=config.environment,
             level=level,
-            render_mode=None,
+            render_mode="human" if config.render else None,
         )
 
         # Set up agent
@@ -48,14 +51,27 @@ def main(config: NeurioConfig) -> float:
         # Run game loop
         log.info(f"Train on level {level}")
 
-        max_reward = MovingMaxReward()
-        min_reward = MovingMinReward()
-        avg_reward = MovingAvgReward()
-        best_avg_reward = BestMovingAvgReward()
+        max_reward = MovingMaxReward(history_size=500)
+        min_reward = MovingMinReward(history_size=500)
+        avg_rewards = {}
+        for hist_size in [100, 200, 500, 1000, 2000, 5000, 10000, None]:
+            if hist_size is not None:
+                name = f"avg_reward_{hist_size:05d}"
+            else:
+                name = "avg_reward"
+            avg_rewards[name] = MovingAvgReward(history_size=hist_size)
+        sum_avg_rewards = SumReward(list(avg_rewards.values()))
+        best_sum_avg_rewards = BestReward(sum_avg_rewards)
         loop = GameLoop(
             train_env,
             agent,
-            reward_trackers=[min_reward, max_reward, avg_reward, best_avg_reward],
+            reward_trackers={
+                "min_reward": min_reward,
+                "max_reward": max_reward,
+                **avg_rewards,
+                "sum_avg_rewards": sum_avg_rewards,
+                "best_sum_avg_rewards": best_sum_avg_rewards,
+            },
         )
 
         log.info(f"Run {config.num_iters} iters.")
@@ -63,13 +79,9 @@ def main(config: NeurioConfig) -> float:
             loop.run_train_iter(config.steps_per_iter)
             if iter % config.save_frequency == 0:
                 agent.save(iter)
-            mlflow.log_metric("min_reward", min_reward.get_value(), step=iter)
-            mlflow.log_metric("max_reward", max_reward.get_value(), step=iter)
-            mlflow.log_metric("avg_reward", avg_reward.get_value(), step=iter)
-            mlflow.log_metric("best_avg_reward", best_avg_reward.get_value(), step=iter)
         agent.save(config.num_iters)
 
-        return best_avg_reward.get_value()
+        return best_sum_avg_rewards.get_value()
 
 
 if __name__ == "__main__":

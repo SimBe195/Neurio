@@ -11,6 +11,7 @@ from typing import Dict, List, Tuple
 import numpy as np
 import numpy.typing as npt
 import torch
+from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
 from torch.utils.data import DataLoader, TensorDataset
 
 from src.models import get_model
@@ -34,15 +35,16 @@ class PPOAgent(Agent):
             tau=self.config.tau,
         )
         self.critic_loss_weight = self.config.critic_loss_weight
-        self.entropy_loss_weight = self.config.entropy_loss_weight
+        self.max_entropy_loss_weight = self.config.max_entropy_loss_weight
         lr = self.config.learning_rate.learning_rate
 
-        self.batch_size: int = self.config.batch_size
-        self.grad_clip_norm: float = self.config.grad_clip_norm
-        self.clip_value: bool = self.config.clip_value
-        self.clip_param: float = self.config.clip_param
+        self.batch_size = self.config.batch_size
+        self.grad_clip_norm = self.config.grad_clip_norm
+        self.clip_value = self.config.clip_value
+        self.clip_param = self.config.clip_param
 
-        self.epochs_per_update: int = self.config.epochs_per_update
+        self.epochs_per_update = self.config.epochs_per_update
+        self.total_updates = self.config.total_updates
 
         self.cpu = torch.device("cpu")
         if torch.cuda.is_available():
@@ -82,7 +84,7 @@ class PPOAgent(Agent):
                     ],
                 )
             ),
-            artifact_file="torchinfo_summary",
+            artifact_file="torchinfo_summary.txt",
         )
 
         self.opt = torch.optim.Adam(
@@ -101,20 +103,18 @@ class PPOAgent(Agent):
             "scheduler": self.scheduler.state_dict(),
         }
 
-    def _compute_logits_values(
-        self, train: bool = True
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _compute_probs_values(self) -> Tuple[torch.Tensor, torch.Tensor]:
         state = self.experience_buffer.get_last_states()
         action = self.experience_buffer.get_last_actions()
-        logits, values = self.actor_critic.forward(state, action, training=train)
+        probs, values = self.actor_critic.forward(state, action)
 
-        return logits, values
+        return probs, values
 
     def next_actions(self, train: bool = True) -> Tuple[List[int], List[float]]:
         with torch.no_grad():
-            logits, values = self._compute_logits_values(train)
+            probs, values = self._compute_probs_values()
 
-            action_dist = torch.distributions.Categorical(logits=logits)
+            action_dist = torch.distributions.Categorical(probs=probs)
             actions = action_dist.sample()
             log_probs = action_dist.log_prob(actions)
         self.experience_buffer.buffer_values(values)
@@ -160,7 +160,7 @@ class PPOAgent(Agent):
 
     def _get_advantages_returns(self) -> Tuple[torch.Tensor, torch.Tensor]:
         with torch.no_grad():
-            _, v = self._compute_logits_values(train=True)
+            _, v = self._compute_probs_values()
             values_ext = self._get_ext_values(v)
             advantages, returns = self.gae_estimator.get_advantage_returns(
                 self.experience_buffer.get_reward_buffer(),
@@ -196,13 +196,12 @@ class PPOAgent(Agent):
 
     def _calculate_actor_loss(
         self,
-        new_logits: torch.Tensor,
+        new_probs: torch.Tensor,
         b_actions: torch.Tensor,
         b_log_probs: torch.Tensor,
         b_advantages: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.distributions.Categorical]:
-        policy = torch.softmax(new_logits, dim=-1)
-        new_dist = torch.distributions.Categorical(policy)
+        new_dist = torch.distributions.Categorical(probs=new_probs)
 
         new_log_probs = new_dist.log_prob(b_actions)
 
@@ -246,6 +245,20 @@ class PPOAgent(Agent):
         )
         self.opt.step()
 
+    def _current_entropy_loss_weight(self) -> float:
+        if self.update_step <= self.total_updates // 2:
+            return (
+                self.max_entropy_loss_weight
+                * (2 * self.update_step)
+                / self.total_updates
+            )
+        else:
+            return (
+                self.max_entropy_loss_weight
+                * (2 * (self.total_updates - self.update_step))
+                / self.total_updates
+            )
+
     def update(self) -> None:
         losses = {
             "actor": 0.0,
@@ -257,7 +270,9 @@ class PPOAgent(Agent):
         dataset = self._create_dataset_from_buffers()
         dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
 
-        for e in range(self.epochs_per_update):
+        for e in range(1, self.epochs_per_update + 1):
+            total_epoch_loss = 0
+            total_epoch_batches = 0
             for (
                 b_states,
                 b_log_probs,
@@ -267,13 +282,11 @@ class PPOAgent(Agent):
                 b_advantages,
                 b_returns,
             ) in dataloader:
-                logits, v = self.actor_critic.forward(
-                    b_states, b_prev_actions, training=True
-                )
+                probs, v = self.actor_critic.forward(b_states, b_prev_actions)
 
                 # Actor loss
                 act_loss, action_dist = self._calculate_actor_loss(
-                    logits, b_actions, b_log_probs, b_advantages
+                    probs, b_actions, b_log_probs, b_advantages
                 )
                 losses["actor"] += act_loss.item()
 
@@ -289,14 +302,17 @@ class PPOAgent(Agent):
                 loss = (
                     act_loss
                     + self.critic_loss_weight * crit_loss
-                    - self.entropy_loss_weight * entropy
+                    - self._current_entropy_loss_weight() * entropy
                 )
                 losses["total"] += loss.item()
+                total_epoch_loss += loss.item()
+                total_epoch_batches += 1
 
                 # Optimizer
                 self._optimizer_step(loss)
 
-            log.debug(f"Finished epoch {e}.")
+            avg_loss = total_epoch_loss / total_epoch_batches
+            log.debug(f"Finished epoch {e} with avg loss {avg_loss}")
 
         for key in losses:
             losses[key] /= len(dataloader) * self.epochs_per_update
