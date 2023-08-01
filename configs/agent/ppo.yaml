@@ -7,10 +7,11 @@ _target_: src.config.agent.PPOAgentConfig
 
 gamma: 0.99
 tau: 0.95
-epochs_per_update: 4
+epochs_per_update: 5
+total_updates: 0
 batch_size: 256
 clip_param: 0.2
 clip_value: False
 critic_loss_weight: 0.5
-entropy_loss_weight: 0.001
+max_entropy_loss_weight: 0.001
 grad_clip_norm: 0.5
