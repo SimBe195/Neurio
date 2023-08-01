@@ -246,42 +246,6 @@ class CustomRewardWrapper(Wrapper):
         return state, reward, terminated, truncated, info
 
 
-class AddAxisWrapper(Wrapper):
-    """
-    This class represents a wrapper for the game environment that modifies the reset and step methods to always return the results as single-item lists.
-    """
-
-    def __init__(self, *args, **kwargs) -> None:
-        """
-        Constructor for the AddAxisWrapper.
-
-        :param args: Positional arguments
-        :param kwargs: Additional arguments
-        """
-        super().__init__(*args, **kwargs)
-
-    def reset(self) -> Tuple[List[npt.NDArray], dict]:
-        """
-        Reset the environment.
-
-        :return: The initial state and information, both as single-item lists
-        """
-        state, info = super().reset()
-        return [state], {key: [value] for key, value in info.items()}
-
-    def step(self, action: List[int]) -> MultiStepType:
-        """
-        Perform the action.
-
-        :param action: The action to be performed
-        :return: The state, reward, termination and truncation flags, and info, all as single-item lists
-        """
-        assert len(action) == 1
-        state, reward, terminated, truncated, info = super().step(action[0])
-        info = {key: [value] for key, value in info.items()}
-        return [state], [reward], [terminated], [truncated], info
-
-
 def get_environment(
     config: EnvironmentConfig,
     **kwargs,
@@ -306,18 +270,6 @@ def get_environment(
     return env
 
 
-def get_singleprocess_environment(*args, **kwargs) -> AddAxisWrapper:
-    """
-    Setup a single process game environment.
-
-    :param args: Positional arguments for get_environment()
-    :param kwargs: Keyword arguments for get_environment()
-    :return: The wrapped environment with an extra dimension added
-    """
-    env = get_environment(*args, **kwargs)
-    return AddAxisWrapper(env)
-
-
 def get_multiprocess_environment(num_environments: int, *args, **kwargs) -> Env:
     """
     Setup a multiprocess game environment.
@@ -327,8 +279,6 @@ def get_multiprocess_environment(num_environments: int, *args, **kwargs) -> Env:
     :param kwargs: Keyword arguments for get_environment()
     :return: The vectorized environment
     """
-    if num_environments == 1:
-        return get_singleprocess_environment(*args, **kwargs)
     return AsyncVectorEnv(
         [lambda: get_environment(*args, **kwargs) for _ in range(num_environments)],
         copy=False,
