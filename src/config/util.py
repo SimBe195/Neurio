@@ -1,11 +1,10 @@
-from dataclasses import fields, is_dataclass
 from logging import Logger
 from typing import Any, Dict, Optional
 
+from dataclasses import fields, is_dataclass
 
-def update_config_with_dict(
-    config: Any, params: Dict, log: Optional[Logger] = None
-) -> None:
+
+def update_config_with_dict(config: Any, params: Dict, log: Optional[Logger] = None) -> None:
     # ToDo: Fix error where "nested" params are sometimes saved wrong in string form instead of dict
     if isinstance(params, str):
         params = eval(params)
@@ -25,9 +24,7 @@ def update_config_with_dict(
                 log.info(f"Setting {field.name} to {params[field.name]}")
 
 
-def flatten(
-    config: Dict[str, Any], parent_key: str = "", sep: str = "."
-) -> Dict[str, Any]:
+def flatten(config: Dict[str, Any], parent_key: str = "", sep: str = ".") -> Dict[str, Any]:
     result = {}
     for k, v in config.items():
         new_key = parent_key + sep + k if parent_key else k

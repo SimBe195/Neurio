@@ -1,10 +1,10 @@
 from abc import ABC, abstractmethod
-from typing import List, Tuple
+from typing import Tuple
 
-import numpy.typing as npt
+import numpy as np
 
-from src.config.agent import AgentConfig
-from src.environment import EnvironmentInfo
+from config.agent import AgentConfig
+from environment import EnvironmentInfo
 
 
 class Agent(ABC):
@@ -16,13 +16,13 @@ class Agent(ABC):
         self.config = config
         self.env_info = env_info
 
-    def save(self, iter: int) -> None:
+    def save(self, save_iter: int) -> None:
         pass
 
-    def load(self, iter: int) -> None:
+    def load(self, load_iter: int) -> None:
         pass
 
-    def feed_observation(self, state: npt.NDArray) -> None:
+    def feed_observation(self, state: np.ndarray) -> None:
         pass
 
     def update(self) -> None:
@@ -33,7 +33,7 @@ class Agent(ABC):
         return self.env_info.num_workers
 
     @abstractmethod
-    def next_actions(self) -> Tuple[List[int], List[float]]:
+    def next_actions(self) -> Tuple[np.ndarray, np.ndarray]:
         """
         Gets indices and log probabilities of the next actions for each worker.
         """
@@ -42,5 +42,5 @@ class Agent(ABC):
     def reset(self) -> None:
         pass
 
-    def give_reward(self, reward: float, done: bool = False) -> None:
+    def give_reward(self, reward: np.ndarray, done: np.ndarray) -> None:
         pass

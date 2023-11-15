@@ -1,16 +1,16 @@
 import logging
-from dataclasses import asdict
 
 import hydra
 import mlflow
+from dataclasses import asdict
 from hydra.utils import instantiate
 from tqdm import tqdm
 
-from src.agents import get_agent
-from src.config import NeurioConfig, flatten
-from src.environment import get_env_info, get_multiprocess_environment
-from src.game_loop import GameLoop
-from src.reward_trackers import (
+from agents import get_agent
+from config import NeurioConfig, flatten
+from environment import get_env_info, get_multiprocess_environment
+from game_loop import GameLoop
+from reward_trackers import (
     BestReward,
     MovingAvgReward,
     MovingMaxReward,
@@ -23,7 +23,7 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
 
-@hydra.main(version_base="1.3", config_path="configs", config_name="neurio_config")
+@hydra.main(version_base="1.3", config_path="../configs", config_name="neurio_config")
 def main(config: NeurioConfig) -> float:
     config = instantiate(config)
     study_name = f"Neurio-lev-{config.level}"
@@ -75,10 +75,10 @@ def main(config: NeurioConfig) -> float:
         )
 
         log.info(f"Run {config.num_iters} iters.")
-        for iter in tqdm(range(config.num_iters)):
+        for train_iter in tqdm(range(config.num_iters)):
             loop.run_train_iter(config.steps_per_iter)
-            if iter % config.save_frequency == 0:
-                agent.save(iter)
+            if train_iter % config.save_frequency == 0:
+                agent.save(train_iter)
         agent.save(config.num_iters)
 
         return best_sum_avg_rewards.get_value()

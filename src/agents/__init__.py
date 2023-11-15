@@ -1,11 +1,8 @@
-from src.config.agent import AgentConfig, PPOAgentConfig, RandomAgentConfig
-from src.environment import EnvironmentInfo
-
-from .advantage import *
-from .agent import *
-from .experience_buffer import *
-from .ppo_agent import *
-from .random_agent import *
+from config.agent import RandomAgentConfig, PPOAgentConfig, AgentConfig
+from environment import EnvironmentInfo
+from .agent import Agent
+from .ppo_agent import PPOAgent
+from .random_agent import RandomAgent
 
 
 def get_agent(config: AgentConfig, env_info: EnvironmentInfo) -> Agent:

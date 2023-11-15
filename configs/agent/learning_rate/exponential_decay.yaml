@@ -1,4 +1,4 @@
-_target_: src.config.learning_rate.ExponentialDecayLRConfig
+_target_: config.learning_rate.ExponentialDecayLRConfig
 
 learning_rate: 5.5e-04
 decay_factor: 0.999

@@ -36,8 +36,3 @@ class PPOAgentConfig(AgentConfig):
         assert self.total_updates >= 1
         assert self.batch_size >= 1
         assert 0 <= self.clip_param <= 1
-
-
-# cs = ConfigStore.instance()
-# cs.store(group="agent", name="base_ppo", node=PPOAgentConfig)
-# cs.store(group="agent", name="base_random", node=RandomAgentConfig)

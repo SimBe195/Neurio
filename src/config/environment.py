@@ -1,7 +1,5 @@
 from dataclasses import dataclass
 
-from hydra.core.config_store import ConfigStore
-
 
 @dataclass
 class EnvironmentConfig:
@@ -24,7 +22,3 @@ class EnvironmentConfig:
         assert self.clip_left >= 0
         assert self.clip_right >= 0
         assert self.subsampling_factor >= 1
-
-
-# cs = ConfigStore.instance()
-# cs.store(group="environment", name="base_environment", node=EnvironmentConfig)

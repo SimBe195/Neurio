@@ -3,8 +3,8 @@ from typing import Tuple
 
 import torch
 
-from src.config.model import ModelConfig
-from src.environment import EnvironmentInfo
+from config.model import ModelConfig
+from environment import EnvironmentInfo
 
 
 class Model(torch.nn.Module):
@@ -18,7 +18,5 @@ class Model(torch.nn.Module):
         self.config = config
 
     @abstractmethod
-    def forward(
-        self, x: torch.Tensor, prev_actions: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor, prev_actions: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         ...

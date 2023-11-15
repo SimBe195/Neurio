@@ -1,24 +1,19 @@
 import logging
-
-import mlflow
-import torchinfo
-
-from src.config.agent import PPOAgentConfig
-
-log = logging.getLogger(__name__)
 from typing import Dict, List, Tuple
 
+import mlflow
 import numpy as np
-import numpy.typing as npt
 import torch
-from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
+import torchinfo
 from torch.utils.data import DataLoader, TensorDataset
 
-from src.models import get_model
-
+from config.agent import PPOAgentConfig
+from models import get_model
 from .advantage import GaeEstimator
 from .agent import Agent
 from .experience_buffer import ExperienceBuffer
+
+log = logging.getLogger(__name__)
 
 
 class PPOAgent(Agent):
@@ -58,9 +53,7 @@ class PPOAgent(Agent):
 
         self.experience_buffer = ExperienceBuffer(self.num_workers, device=self.device)
 
-        self.actor_critic = get_model(
-            config=self.config.model, env_info=self.env_info
-        ).to(self.device)
+        self.actor_critic = get_model(config=self.config.model, env_info=self.env_info).to(self.device)
 
         mlflow.log_text(
             str(
@@ -131,21 +124,21 @@ class PPOAgent(Agent):
     def reset(self) -> None:
         self.experience_buffer.reset()
 
-    def save(self, iter: int) -> None:
+    def save(self, save_iter: int) -> None:
         for name, module in [
             ("actor_critic", self.actor_critic),
             ("optimizer", self.opt),
             ("scheduler", self.scheduler),
         ]:
-            mlflow.pytorch.log_state_dict(module.state_dict(), f"{name}-{iter:04d}")
+            mlflow.pytorch.log_state_dict(module.state_dict(), f"{name}-{save_iter:04d}")
 
-    def load(self, iter: int) -> None:
+    def load(self, load_iter: int) -> None:
         for name, module in [
             ("actor_critic", self.actor_critic),
             ("optimizer", self.opt),
             ("scheduler", self.scheduler),
         ]:
-            artifact_uri = mlflow.get_artifact_uri(f"{name}-{iter:04d}")
+            artifact_uri = mlflow.get_artifact_uri(f"{name}-{load_iter:04d}")
             state_dict = mlflow.pytorch.load_state_dict(artifact_uri)
             module.load_state_dict(state_dict)
 
@@ -190,9 +183,7 @@ class PPOAgent(Agent):
     def _create_dataset_from_buffers(self) -> TensorDataset:
         advantages, returns = self._get_advantages_returns()
         states, log_probs, values, actions, prev_actions = self._get_reshaped_buffers()
-        return TensorDataset(
-            states, log_probs, values, actions, prev_actions, advantages, returns
-        )
+        return TensorDataset(states, log_probs, values, actions, prev_actions, advantages, returns)
 
     def _calculate_actor_loss(
         self,
@@ -207,9 +198,7 @@ class PPOAgent(Agent):
 
         ratio = torch.exp(new_log_probs - b_log_probs)
         act_loss_1 = b_advantages * ratio
-        act_loss_2 = b_advantages * torch.clip(
-            ratio, min=1 - self.clip_param, max=1 + self.clip_param
-        )
+        act_loss_2 = b_advantages * torch.clip(ratio, min=1 - self.clip_param, max=1 + self.clip_param)
 
         act_loss = -torch.mean(torch.minimum(act_loss_1, act_loss_2))
         return act_loss, new_dist
@@ -220,18 +209,14 @@ class PPOAgent(Agent):
         b_returns: torch.Tensor,
         b_values: torch.Tensor,
     ) -> torch.Tensor:
-        crit_loss = 0.5 * torch.nn.functional.mse_loss(
-            b_returns, new_values, reduce=False
-        )
+        crit_loss = 0.5 * torch.nn.functional.mse_loss(b_returns, new_values, reduction="none")
         if self.clip_value:
             v_clip = torch.clip(
                 new_values,
                 min=b_values - self.clip_param,
                 max=b_values + self.clip_param,
             )
-            crit_loss_2 = 0.5 * torch.nn.functional.mse_loss(
-                b_returns, v_clip, reduce=False
-            )
+            crit_loss_2 = 0.5 * torch.nn.functional.mse_loss(b_returns, v_clip, reduction="none")
             crit_loss = torch.maximum(crit_loss, crit_loss_2)
         crit_loss = torch.mean(crit_loss)
 
@@ -240,24 +225,14 @@ class PPOAgent(Agent):
     def _optimizer_step(self, loss: torch.Tensor) -> None:
         self.opt.zero_grad()
         loss.backward(retain_graph=True)
-        torch.nn.utils.clip_grad.clip_grad_norm_(
-            self.actor_critic.parameters(), max_norm=self.grad_clip_norm
-        )
+        torch.nn.utils.clip_grad.clip_grad_norm_(self.actor_critic.parameters(), max_norm=self.grad_clip_norm)
         self.opt.step()
 
     def _current_entropy_loss_weight(self) -> float:
         if self.update_step <= self.total_updates // 2:
-            return (
-                self.max_entropy_loss_weight
-                * (2 * self.update_step)
-                / self.total_updates
-            )
+            return self.max_entropy_loss_weight * (2 * self.update_step) / self.total_updates
         else:
-            return (
-                self.max_entropy_loss_weight
-                * (2 * (self.total_updates - self.update_step))
-                / self.total_updates
-            )
+            return self.max_entropy_loss_weight * (2 * (self.total_updates - self.update_step)) / self.total_updates
 
     def update(self) -> None:
         losses = {
@@ -285,9 +260,7 @@ class PPOAgent(Agent):
                 probs, v = self.actor_critic.forward(b_states, b_prev_actions)
 
                 # Actor loss
-                act_loss, action_dist = self._calculate_actor_loss(
-                    probs, b_actions, b_log_probs, b_advantages
-                )
+                act_loss, action_dist = self._calculate_actor_loss(probs, b_actions, b_log_probs, b_advantages)
                 losses["actor"] += act_loss.item()
 
                 # Critic loss
@@ -299,11 +272,7 @@ class PPOAgent(Agent):
                 losses["entropy"] += entropy.item()
 
                 # Total
-                loss = (
-                    act_loss
-                    + self.critic_loss_weight * crit_loss
-                    - self._current_entropy_loss_weight() * entropy
-                )
+                loss = act_loss + self.critic_loss_weight * crit_loss - self._current_entropy_loss_weight() * entropy
                 losses["total"] += loss.item()
                 total_epoch_loss += loss.item()
                 total_epoch_batches += 1
@@ -324,7 +293,7 @@ class PPOAgent(Agent):
 
         self.experience_buffer.reset()
 
-    def feed_observation(self, state: npt.NDArray) -> None:
+    def feed_observation(self, state: np.ndarray) -> None:
         # State has shape (<num_workers>, <num_stack_frames>, <height>, <width>, <num_channels>)
         # Convert to shape (<num_workers>, <num_stack_frames> * <num_channels>, <height>, <width>)
         state_tensor = torch.tensor(np.array(state), device=self.device)

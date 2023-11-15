@@ -1,24 +1,27 @@
 import time
-from typing import Dict, List
+from typing import Dict, Optional
 
 import mlflow
 import numpy as np
-from gym import Env
+from gym.core import ObsType
+from gym.vector import AsyncVectorEnv
 
-from .agents import Agent
-from .reward_trackers import RewardTracker
+from agents import Agent
+from reward_trackers import RewardTracker
 
 
 class GameLoop:
     def __init__(
         self,
-        environment: Env,
+        environment: AsyncVectorEnv,
         agent: Agent,
-        reward_trackers: Dict[str, RewardTracker] = {},
+        reward_trackers: Optional[Dict[str, RewardTracker]] = None,
     ) -> None:
         self.env = environment
         self.agent = agent
-        self.reward_trackers = reward_trackers
+        self.reward_trackers = reward_trackers or {}
+
+        self.current_states = Optional[ObsType]
 
         self.total_episodes_finished = 0
         self.total_iters_finished = 0
@@ -26,7 +29,8 @@ class GameLoop:
         self.reset()
 
     def reset(self) -> None:
-        self.current_states, _ = self.env.reset()
+        self.env.reset_async()
+        self.current_states, _ = self.env.reset_wait()
 
     def log_episode_stats(self, metrics: Dict) -> None:
         reward = metrics["episode"]["r"]
@@ -34,12 +38,8 @@ class GameLoop:
             tracker.record_reward(reward)
 
         mlflow.log_metric("episode_reward", reward, step=self.total_episodes_finished)
-        mlflow.log_metric(
-            "episode_length", metrics["episode"]["l"], step=self.total_episodes_finished
-        )
-        mlflow.log_metric(
-            "episode_x_pos", metrics["x_pos"], step=self.total_episodes_finished
-        )
+        mlflow.log_metric("episode_length", metrics["episode"]["l"], step=self.total_episodes_finished)
+        mlflow.log_metric("episode_x_pos", metrics["x_pos"], step=self.total_episodes_finished)
 
         self.total_episodes_finished += 1
 
@@ -54,9 +54,10 @@ class GameLoop:
 
         :returns: True if all agents are done.
         """
-        self.agent.feed_observation(self.current_states)  # type: ignore
+        self.agent.feed_observation(self.current_states)
         actions, _ = self.agent.next_actions()
-        states, rewards, terminateds, truncateds, metrics = self.env.step(actions)
+        self.env.step_async(np.array(actions))
+        states, rewards, terminateds, truncateds, metrics = self.env.step_wait()
         self.current_states = states
         dones = np.logical_or(terminateds, truncateds)
 
@@ -83,5 +84,5 @@ class GameLoop:
                 self.reset()
                 episode += 1
             elapsed_time = time.time() - start_time
-            sleep_time = max(0, 1 / framerate - elapsed_time)
+            sleep_time = max(0.0, 1 / framerate - elapsed_time)
             time.sleep(sleep_time)

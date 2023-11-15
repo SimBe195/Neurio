@@ -1,4 +1,4 @@
-_target_: src.config.environment.EnvironmentConfig
+_target_: config.environment.EnvironmentConfig
 
 env_name: SuperMarioBros-v0
 complex_movement: True

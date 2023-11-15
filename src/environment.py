@@ -1,34 +1,30 @@
 import logging
-from dataclasses import dataclass
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, Dict, Literal, Optional, Tuple, Union
 
 import cv2
-import gym
 import gym.logger
+import gym_super_mario_bros
+import numpy as np
+import numpy.typing as npt
+from dataclasses import dataclass
+from gym.core import Env, ObservationWrapper, Wrapper
+from gym.spaces import Box, Discrete, MultiDiscrete
 from gym.vector import AsyncVectorEnv
 from gym.wrappers.frame_stack import FrameStack
 from gym.wrappers.gray_scale_observation import GrayScaleObservation
 from gym.wrappers.record_episode_statistics import RecordEpisodeStatistics
+from gym_super_mario_bros.actions import COMPLEX_MOVEMENT, SIMPLE_MOVEMENT
+from nes_py.wrappers import JoypadSpace
+
+from config.environment import EnvironmentConfig
 
 gym.logger.set_level(logging.ERROR)
-import gym_super_mario_bros
-import numpy as np
-import numpy.typing as npt
-from gym.core import Env, ObservationWrapper, Wrapper
-from gym.spaces import Box, Discrete, MultiDiscrete
-from gym_super_mario_bros.actions import COMPLEX_MOVEMENT, SIMPLE_MOVEMENT
-from nes_py.wrappers import JoypadSpace  # type: ignore
-
-from .config.environment import EnvironmentConfig
 
 BASE_WIDTH = 256
 BASE_HEIGHT = 240
 
 
-StepType = Tuple[npt.NDArray, float, bool, bool, Dict[str, Any]]
-MultiStepType = Tuple[
-    List[npt.NDArray], List[float], List[bool], List[bool], Dict[str, Any]
-]
+StepType = Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]
 
 
 class BaseEnvironment(JoypadSpace):
@@ -65,18 +61,18 @@ class BaseEnvironment(JoypadSpace):
 
 class ClipWrapper(ObservationWrapper):
     """
-    This class represents a wrapper for the game environment that clips the observations from the game to a certain size.
+    This class represents a wrapper for the game environment that clips the observations from the game to a certain size
     """
 
-    def __init__(self, config: EnvironmentConfig, env: Env, **kwargs) -> None:
+    def __init__(self, config: EnvironmentConfig, env: Env, **_) -> None:
         """
         Constructor for the ClipWrapper.
 
-        :param config: Configuration for the environment
+        :param config: Environment configuration
         :param env: The environment to be wrapped
         :param kwargs: Additional arguments
         """
-        super().__init__(env, **kwargs)
+        super().__init__(env)
 
         self.clip_top = config.clip_top
         self.clip_bot = config.clip_bot
@@ -118,15 +114,15 @@ class SubsampleWrapper(ObservationWrapper):
     This class represents a wrapper for the game environment that subsamples the observations from the game.
     """
 
-    def __init__(self, config: EnvironmentConfig, env: Env, **kwargs) -> None:
+    def __init__(self, config: EnvironmentConfig, env: Env, **_) -> None:
         """
         Constructor for the SubsampleWrapper.
 
-        :param config: Configuration for the environment
+        :param config: Environment configuration
         :param env: The environment to be wrapped
         :param kwargs: Additional arguments
         """
-        super().__init__(env, **kwargs)
+        super().__init__(env)
 
         factor = config.subsampling_factor
 
@@ -138,9 +134,7 @@ class SubsampleWrapper(ObservationWrapper):
             obs_shape = (int(h / factor), int(w / factor), *obs_shape[2:])
 
         self.height, self.width = obs_shape[:2]
-        assert (
-            self.height > 0 and self.width > 0
-        ), "The subsampled observation must have positive dimensions."
+        assert self.height > 0 and self.width > 0, "The sub-sampled observation must have positive dimensions."
 
         self.observation_space = Box(
             low=0,
@@ -154,7 +148,7 @@ class SubsampleWrapper(ObservationWrapper):
         Subsample the observation based on the pre-configured settings.
 
         :param observation: The original observation
-        :return: The subsampled observation
+        :return: The sub-sampled observation
         """
         result = cv2.resize(observation, (self.height, self.width))
         if len(result.shape) == 2:
@@ -167,7 +161,7 @@ class ActionRepeatWrapper(Wrapper):
     This class represents a wrapper for the game environment that repeats the same action for multiple steps.
     """
 
-    def __init__(self, config: EnvironmentConfig, env: Env, **kwargs) -> None:
+    def __init__(self, config: EnvironmentConfig, env: Env, **_) -> None:
         """
         Constructor for the ActionRepeatWrapper.
 
@@ -175,7 +169,7 @@ class ActionRepeatWrapper(Wrapper):
         :param env: The environment to be wrapped
         :param kwargs: Additional arguments
         """
-        super().__init__(env, **kwargs)
+        super().__init__(env)
         self.num_repeat_frames = config.num_repeat_frames
 
     def step(self, action: int) -> StepType:
@@ -251,7 +245,7 @@ def get_environment(
     **kwargs,
 ) -> Env:
     """
-    Setup the game environment with the given configuration.
+    Set up the game environment with the given configuration.
     This includes several wrappers for preprocessing observations and actions.
 
     :param config: Configuration for the environment
@@ -270,9 +264,9 @@ def get_environment(
     return env
 
 
-def get_multiprocess_environment(num_environments: int, *args, **kwargs) -> Env:
+def get_multiprocess_environment(num_environments: int, *args, **kwargs) -> AsyncVectorEnv:
     """
-    Setup a multiprocess game environment.
+    Set up a multiprocess game environment.
 
     :param num_environments: Number of parallel environments
     :param args: Positional arguments for get_environment()
@@ -328,6 +322,4 @@ def get_env_info(env: Env) -> EnvironmentInfo:
     else:
         num_workers = 1
 
-    return EnvironmentInfo(
-        width, height, stack_frames, channels, num_actions, num_workers
-    )
+    return EnvironmentInfo(width, height, stack_frames, channels, num_actions, num_workers)

@@ -3,7 +3,7 @@ from typing import List
 import torch
 import torch.nn as nn
 
-from src.environment import EnvironmentInfo
+from environment import EnvironmentInfo
 
 
 class ConvEncoder(nn.Module):
@@ -21,12 +21,12 @@ class ConvEncoder(nn.Module):
         prev_filters = env_info.total_channel_dim
         conv_width = env_info.width
         conv_height = env_info.height
-        for n_f, k_s, strd in zip(num_filters, kernel_sizes, strides):
-            self.conv_layers.append(nn.Conv2d(prev_filters, n_f, k_s, strd))
+        for n_f, k_s, stride in zip(num_filters, kernel_sizes, strides):
+            self.conv_layers.append(nn.Conv2d(prev_filters, n_f, k_s, stride))
             self.conv_layers.append(nn.ReLU())
             prev_filters = n_f
-            conv_width = (conv_width - k_s) // strd + 1
-            conv_height = (conv_height - k_s) // strd + 1
+            conv_width = (conv_width - k_s) // stride + 1
+            conv_height = (conv_height - k_s) // stride + 1
 
         self.fc_layer = nn.Linear(conv_width * conv_height * prev_filters, fc_size)
 

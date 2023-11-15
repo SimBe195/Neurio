@@ -50,19 +50,13 @@ class ExperienceBuffer:
         assert dones.dim() == 1
         assert dones.size(0) == self.num_workers
         dones_cast = dones.to(torch.int64)
-        self.prev_actions.append(
-            torch.multiply(self.prev_actions.pop(-1), 1 - dones_cast)
-        )
+        self.prev_actions.append(torch.multiply(self.prev_actions.pop(-1), 1 - dones_cast))
         self.dones.append(dones_cast)
 
     def reset(self, forget_prev_action: bool = False) -> None:
         self.states = []
         if forget_prev_action:
-            self.prev_actions = [
-                torch.zeros(
-                    size=(self.num_workers,), dtype=torch.int64, device=self.device
-                )
-            ]
+            self.prev_actions = [torch.zeros(size=(self.num_workers,), dtype=torch.int64, device=self.device)]
         else:
             self.prev_actions = self.prev_actions[-1:]
         self.dones = []

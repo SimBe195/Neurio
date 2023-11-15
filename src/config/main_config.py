@@ -1,7 +1,6 @@
-from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Optional
 
-from hydra.core.config_store import ConfigStore
+from dataclasses import dataclass
 
 from .agent import AgentConfig
 from .environment import EnvironmentConfig
@@ -19,7 +18,6 @@ class NeurioConfig:
     render: bool
     test_run_id: Optional[str] = None
     test_iter: Optional[int] = None
-    # _target_: str = ""
 
     def __post_init__(self) -> None:
         assert self.num_workers > 0
@@ -28,8 +26,3 @@ class NeurioConfig:
         assert self.save_frequency > 0
         if self.test_iter is not None:
             assert self.test_iter >= 0
-
-
-# cs = ConfigStore.instance()
-# cs.store(name="base_neurio_config", node=NeurioConfig)
-# cs.store(name="neurio_config", node=NeurioConfig)

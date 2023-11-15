@@ -1,7 +1,5 @@
 from dataclasses import dataclass
 
-from hydra.core.config_store import ConfigStore
-
 
 @dataclass
 class ModelConfig:
@@ -24,7 +22,3 @@ class ActorCriticConfig(ModelConfig):
         assert self.kernel_size > 0
         assert self.stride > 0
         assert self.fc_size > 0
-
-
-# cs = ConfigStore.instance()
-# cs.store(group="agent/model", name="base_actor_critic", node=ActorCriticConfig)
