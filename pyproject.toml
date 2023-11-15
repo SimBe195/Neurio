@@ -1,0 +1,9 @@
+name = "Neurio"
+version = "0.1.0"
+description = "Training a super-mario-bros AI using reinforcement learning"
+authors = [ "Simon Berger" ]
+
+repository="https://github.com/SimBe195/2022-09-01_neurio"
+
+[tool.black]
+line-length = 120
