@@ -2,6 +2,7 @@ from typing import List
 
 import torch
 import torch.nn as nn
+from jaxtyping import Float
 
 from environment import EnvironmentInfo
 
@@ -40,8 +41,7 @@ class ConvEncoder(nn.Module):
     def get_out_size(self) -> int:
         return self.out_size
 
-    def forward(self, x: torch.Tensor):
-        x = x / 255.0
+    def forward(self, x: Float[torch.Tensor, "*batch channel height width"]):
         x = (x / 127.5) - 1
         for conv in self.conv_layers:
             x = conv(x)

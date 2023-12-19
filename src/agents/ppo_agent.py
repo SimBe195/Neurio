@@ -5,6 +5,8 @@ import mlflow
 import numpy as np
 import torch
 import torchinfo
+from beartype import beartype
+from jaxtyping import Float, Int64, jaxtyped
 from torch.utils.data import DataLoader, TensorDataset
 
 from config.agent import PPOAgentConfig
@@ -16,6 +18,7 @@ from .experience_buffer import ExperienceBuffer
 log = logging.getLogger(__name__)
 
 
+@jaxtyped(typechecker=beartype)
 class PPOAgent(Agent):
     def __init__(
         self,
@@ -100,7 +103,9 @@ class PPOAgent(Agent):
             "scheduler": self.scheduler.state_dict(),
         }
 
-    def _compute_probs_values(self) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _compute_probs_values(
+        self,
+    ) -> Tuple[Float[torch.Tensor, "worker action"], Float[torch.Tensor, "worker"]]:
         state = self.experience_buffer.get_last_states()
         action = self.experience_buffer.get_last_actions()
         probs, values = self.actor_critic.forward(state, action)
@@ -146,16 +151,18 @@ class PPOAgent(Agent):
             state_dict = mlflow.pytorch.load_state_dict(artifact_uri)
             module.load_state_dict(state_dict)
 
-    def _get_ext_values(self, v: torch.Tensor) -> torch.Tensor:
+    def _get_ext_values(self, v: Float[torch.Tensor, "worker"]) -> Float[torch.Tensor, "buffer+1 worker"]:
         values = self.experience_buffer.get_value_buffer()
         return torch.concat([values, v.unsqueeze(0)])
 
     @staticmethod
-    def _reshape_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    def _reshape_tensor(tensor: Float[torch.Tensor, "buffer worker *rest"]) -> Float[torch.Tensor, "batch *rest"]:
         total_samples = tensor.size(0) * tensor.size(1)
         return tensor.reshape((total_samples, *tensor.shape[2:]))
 
-    def _get_advantages_returns(self) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _get_advantages_returns(
+        self,
+    ) -> Tuple[Float[torch.Tensor, "batch worker"], Float[torch.Tensor, "batch worker"]]:
         with torch.no_grad():
             _, v = self._compute_probs_values()
             values_ext = self._get_ext_values(v)
@@ -169,7 +176,15 @@ class PPOAgent(Agent):
 
             return advantages, returns
 
-    def _get_reshaped_buffers(self) -> Tuple[torch.Tensor, ...]:
+    def _get_reshaped_buffers(
+        self,
+    ) -> Tuple[
+        Float[torch.Tensor, "batch channel height width"],
+        Float[torch.Tensor, "batch"],
+        Float[torch.Tensor, "batch"],
+        Int64[torch.Tensor, "batch"],
+        Int64[torch.Tensor, "batch"],
+    ]:
         states = self.experience_buffer.get_state_buffer()
         log_probs = self.experience_buffer.get_log_prob_buffer()
         values = self.experience_buffer.get_value_buffer()
@@ -191,11 +206,11 @@ class PPOAgent(Agent):
 
     def _calculate_actor_loss(
         self,
-        new_probs: torch.Tensor,
-        b_actions: torch.Tensor,
-        b_log_probs: torch.Tensor,
-        b_advantages: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.distributions.Categorical]:
+        new_probs: Float[torch.Tensor, "minibatch"],
+        b_actions: Float[torch.Tensor, "minibatch"],
+        b_log_probs: Float[torch.Tensor, "minibatch"],
+        b_advantages: Float[torch.Tensor, "minibatch"],
+    ) -> Tuple[Float[torch.Tensor, "minibatch"], torch.distributions.Categorical]:
         new_dist = torch.distributions.Categorical(probs=new_probs)
 
         new_log_probs = new_dist.log_prob(b_actions)
@@ -209,24 +224,24 @@ class PPOAgent(Agent):
 
     def _calculate_critic_loss(
         self,
-        new_values: torch.Tensor,
-        b_returns: torch.Tensor,
-        b_values: torch.Tensor,
-    ) -> torch.Tensor:
-        crit_loss = 0.5 * torch.nn.functional.mse_loss(b_returns, new_values, reduction="none")
+        new_values: Float[torch.Tensor, "minibatch"],
+        b_returns: Float[torch.Tensor, "minibatch"],
+        b_values: Float[torch.Tensor, "minibatch"],
+    ) -> Float[torch.Tensor, "minibatch"]:
+        crit_loss = torch.mul(torch.nn.functional.mse_loss(b_returns, new_values, reduction="none"), 0.5)
         if self.clip_value:
             v_clip = torch.clip(
                 new_values,
                 min=b_values - self.clip_param,
                 max=b_values + self.clip_param,
             )
-            crit_loss_2 = 0.5 * torch.nn.functional.mse_loss(b_returns, v_clip, reduction="none")
+            crit_loss_2 = torch.mul(torch.nn.functional.mse_loss(b_returns, v_clip, reduction="none"), 0.5)
             crit_loss = torch.maximum(crit_loss, crit_loss_2)
         crit_loss = torch.mean(crit_loss)
 
         return crit_loss
 
-    def _optimizer_step(self, loss: torch.Tensor) -> None:
+    def _optimizer_step(self, loss: Float[torch.Tensor, ""]) -> None:
         self.opt.zero_grad()
         loss.backward(retain_graph=True)
         torch.nn.utils.clip_grad.clip_grad_norm_(self.actor_critic.parameters(), max_norm=self.grad_clip_norm)
@@ -302,12 +317,12 @@ class PPOAgent(Agent):
         mlflow.log_metrics(losses, self.update_step)
         self.update_step += 1
 
-        self.experience_buffer.reset()
-
     def feed_observation(self, state: np.ndarray) -> None:
         # State has shape (<num_workers>, <num_stack_frames>, <height>, <width>, <num_channels>)
         # Convert to shape (<num_workers>, <num_stack_frames> * <num_channels>, <height>, <width>)
-        state_tensor = torch.tensor(np.array(state), device=self.device)
+        state_tensor: Float[torch.Tensor, "worker stack_frame height width color_channel"] = torch.tensor(
+            np.array(state), device=self.device
+        )
         state_tensor = torch.concat(torch.unbind(state_tensor, dim=1), dim=-1)
         state_tensor = torch.moveaxis(state_tensor, -1, 1)
         self.experience_buffer.buffer_states(state_tensor)

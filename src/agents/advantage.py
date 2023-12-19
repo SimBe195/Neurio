@@ -2,6 +2,7 @@ from typing import Tuple
 
 import torch
 from dataclasses import dataclass
+from jaxtyping import Float
 
 
 @dataclass
@@ -25,34 +26,23 @@ class GaeEstimator:
 
     def get_advantage_returns(
         self,
-        rewards: torch.Tensor,
-        values: torch.Tensor,
-        dones: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        rewards: Float[torch.Tensor, "buffer worker"],
+        values: Float[torch.Tensor, "buffer+1 worker"],
+        dones: Float[torch.Tensor, "buffer worker"],
+    ) -> Tuple[Float[torch.Tensor, "buffer worker"], Float[torch.Tensor, "buffer worker"]]:
         """
         Calculate the Generalized Advantage Estimation (GAE) and returns.
 
         Args:
-            rewards: Tensor of rewards of shape (T) or (T, W).
-            values: Tensor of values of shape (T+1) or (T+1, W).
-            dones: Tensor indicating if an episode is done of shape (T) or (T, W).
+            rewards: Tensor of rewards of shape (T, W).
+            values: Tensor of values of shape (T+1, W).
+            dones: Tensor indicating if an episode is done of shape (T, W).
 
         Returns:
-            Tuple[torch.Tensor, torch.Tensor]: A tuple containing the advantages and returns of shape (T) or (T, W).
+            Tuple[torch.Tensor, torch.Tensor]: A tuple containing the advantages and returns of shape (T, W).
         """
-        # Shape (T, W) or (T)
-        if not (rewards.dim() == values.dim() == dones.dim() <= 2):
-            raise ValueError("All inputs must have the same number of dimensions (<= 2).")
 
-        # Value has time T+1 to contain the next_value after the last state
-        if not (rewards.shape[0] == values.shape[0] - 1 == dones.shape[0]):
-            raise ValueError("Mismatch in the shape of rewards, values, and dones.")
-
-        # Worker dimension is the same for every one
-        if rewards.dim() == 2 and not (rewards.shape[1] == values.shape[1] == dones.shape[1]):
-            raise ValueError("Mismatch in the worker dimension.")
-
-        # Shape (T, W) or (T)
+        # Shape (T, W)
         deltas = rewards + self.gamma * values[1:] * (1 - dones) - values[:-1]
 
         advantages = torch.zeros_like(rewards)

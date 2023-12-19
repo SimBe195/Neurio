@@ -2,6 +2,7 @@ from typing import Tuple
 
 import torch
 import torch.nn as nn
+from jaxtyping import Float, Int64
 
 from config.model import ActorCriticConfig
 from .conv_encoder import ConvEncoder
@@ -36,7 +37,9 @@ class ActorCritic(Model):
                 nn.init.orthogonal_(module.weight, nn.init.calculate_gain("relu"))  # type: ignore
                 nn.init.constant_(module.bias, 0)  # type: ignore
 
-    def forward(self, x: torch.Tensor, prev_actions: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self, x: Float[torch.Tensor, "*batch channel height width"], prev_actions: Int64[torch.Tensor, "*batch"]
+    ) -> Tuple[Float[torch.Tensor, "*batch action"], Float[torch.Tensor, "*batch"]]:
         x = self.encoder(x)
         a = self.action_embed(prev_actions)
 
