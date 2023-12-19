@@ -3,7 +3,7 @@ _target_: config.environment.EnvironmentConfig
 env_name: SuperMarioBros-v0
 complex_movement: True
 num_repeat_frames: 4
-num_stack_frames: 3
+num_stack_frames: 2
 clip_top: 0
 clip_bot: 0
 clip_left: 0

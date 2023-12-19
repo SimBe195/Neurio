@@ -1,0 +1,5 @@
+_target_: config.sampling_strategy.AdaptiveEpsilonGreedySamplingStrategy
+
+initial_epsilon: 0.5
+min_epsilon: 0.01
+decay_factor: 0.99

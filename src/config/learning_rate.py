@@ -18,6 +18,8 @@ class LRConfig(ABC):
 
 @dataclass
 class ConstantLRConfig(LRConfig):
+    name: str = "constant"
+
     def create_scheduler(self, optimizer: torch.optim.Optimizer) -> torch.optim.lr_scheduler.LRScheduler:
         return torch.optim.lr_scheduler.ConstantLR(optimizer=optimizer, factor=1.0, total_iters=0)
 
@@ -25,6 +27,7 @@ class ConstantLRConfig(LRConfig):
 @dataclass
 class ExponentialDecayLRConfig(LRConfig):
     decay_factor: float
+    name: str = "exponential_decay"
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -37,6 +40,7 @@ class ExponentialDecayLRConfig(LRConfig):
 @dataclass
 class LinearDecayLRConfig(LRConfig):
     decay_iters: int
+    name: str = "linear_decay"
 
     def __post_init__(self) -> None:
         super().__post_init__()

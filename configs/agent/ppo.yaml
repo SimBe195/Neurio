@@ -1,17 +1,19 @@
 defaults:
   - model: actor_critic
   - learning_rate: linear_decay
+  - sampling_strategy: dist_sample
   - _self_
 
 _target_: config.agent.PPOAgentConfig
 
-gamma: 0.903
-tau: 0.854
+gamma: 0.9
+tau: 0.85
+exp_buffer_size: 512
 epochs_per_update: 5
 total_updates: 0
-batch_size: 256
+batch_size: 512
 clip_param: 0.2
 clip_value: False
-critic_loss_weight: 0.818
-max_entropy_loss_weight: 0.00118
+critic_loss_weight: 0.8
+max_entropy_loss_weight: 0.001
 grad_clip_norm: 0.5

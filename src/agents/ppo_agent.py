@@ -51,9 +51,13 @@ class PPOAgent(Agent):
             device_name = torch.cuda.get_device_name(self.cpu)
             log.info(f"Using CPU {device_name}")
 
-        self.experience_buffer = ExperienceBuffer(self.num_workers, device=self.device)
+        self.experience_buffer = ExperienceBuffer(
+            self.num_workers, size=self.config.exp_buffer_size, device=self.device
+        )
 
         self.actor_critic = get_model(config=self.config.model, env_info=self.env_info).to(self.device)
+
+        self.sampling_strategy = self.config.sampling_strategy
 
         mlflow.log_text(
             str(
@@ -106,10 +110,10 @@ class PPOAgent(Agent):
     def next_actions(self, train: bool = True) -> Tuple[List[int], List[float]]:
         with torch.no_grad():
             probs, values = self._compute_probs_values()
+            actions = self.sampling_strategy.sample_action(probs)
 
-            action_dist = torch.distributions.Categorical(probs=probs)
-            actions = action_dist.sample()
-            log_probs = action_dist.log_prob(actions)
+            eps = torch.finfo(probs.dtype).eps
+            log_probs = torch.log(probs.clamp(min=eps, max=1 - eps)).gather(-1, actions.unsqueeze(-1)).squeeze(-1)
         self.experience_buffer.buffer_values(values)
         self.experience_buffer.buffer_log_probs(log_probs)
         self.experience_buffer.buffer_actions(actions)
@@ -236,10 +240,10 @@ class PPOAgent(Agent):
 
     def update(self) -> None:
         losses = {
-            "actor": 0.0,
-            "critic": 0.0,
-            "entropy": 0.0,
-            "total": 0.0,
+            "actor_loss": 0.0,
+            "critic_loss": 0.0,
+            "entropy_loss": 0.0,
+            "total_loss": 0.0,
         }
 
         dataset = self._create_dataset_from_buffers()
@@ -261,19 +265,25 @@ class PPOAgent(Agent):
 
                 # Actor loss
                 act_loss, action_dist = self._calculate_actor_loss(probs, b_actions, b_log_probs, b_advantages)
-                losses["actor"] += act_loss.item()
+                losses["actor_loss"] += act_loss.item()
 
                 # Critic loss
                 crit_loss = self._calculate_critic_loss(v, b_returns, b_values)
-                losses["critic"] += crit_loss.item()
+                losses["critic_loss"] += crit_loss.item()
 
                 # Entropy loss
                 entropy = torch.mean(action_dist.entropy())
-                losses["entropy"] += entropy.item()
+                losses["entropy_loss"] += entropy.item()
 
                 # Total
-                loss = act_loss + self.critic_loss_weight * crit_loss - self._current_entropy_loss_weight() * entropy
-                losses["total"] += loss.item()
+                loss = torch.add(
+                    act_loss,
+                    torch.sub(
+                        torch.mul(self.critic_loss_weight, crit_loss),
+                        torch.mul(self._current_entropy_loss_weight(), entropy),
+                    ),
+                )
+                losses["total_loss"] += loss.item()
                 total_epoch_loss += loss.item()
                 total_epoch_batches += 1
 
@@ -287,6 +297,7 @@ class PPOAgent(Agent):
             losses[key] /= len(dataloader) * self.epochs_per_update
         log.debug(f"Update finished. Losses: {losses}")
         self.scheduler.step()
+        self.sampling_strategy.update(-losses["total_loss"])
 
         mlflow.log_metrics(losses, self.update_step)
         self.update_step += 1

@@ -15,9 +15,9 @@ class ActorCritic(Model):
 
         self.encoder = ConvEncoder(
             self.env_info,
-            num_filters=[self.config.num_filters] * self.config.num_layers,
-            kernel_sizes=[self.config.kernel_size] * self.config.num_layers,
-            strides=[self.config.stride] * self.config.num_layers,
+            num_filters=self.config.num_filters,
+            kernel_sizes=self.config.kernel_sizes,
+            strides=[kernel_size // 2 for kernel_size in self.config.kernel_sizes],
             fc_size=self.config.fc_size,
         )
         enc_size = self.encoder.out_size

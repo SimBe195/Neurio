@@ -203,7 +203,9 @@ class CustomRewardWrapper(Wrapper):
         :param kwargs: Additional arguments
         """
         super().__init__(*args, **kwargs)
-        self.curr_score = 0
+        self.prev_y_pos = float("inf")
+        self.prev_action = -1
+        self.fell_off = False
 
     def reset(self) -> Tuple[npt.NDArray, dict]:
         """
@@ -211,7 +213,9 @@ class CustomRewardWrapper(Wrapper):
 
         :return: The initial state and information
         """
-        self.curr_score = 0
+        self.prev_y_pos = float("inf")
+        self.prev_action = -1
+        self.fell_off = False
         return super().reset()
 
     def step(self, action: int) -> StepType:
@@ -223,19 +227,23 @@ class CustomRewardWrapper(Wrapper):
         """
         state, reward, terminated, truncated, info = super().step(action)
 
-        next_score = info["score"]
-        score_diff = next_score - self.curr_score
-        self.curr_score = next_score
+        reward /= 10
 
-        reward += score_diff / 40
+        reward += max(0, info["y_pos"] - self.prev_y_pos) / 20
+        reward += (self.prev_action == action) / 20
+
+        self.prev_y_pos = info["y_pos"]
+        self.prev_action = action
+
+        if info["y_pos"] < 79 and not self.fell_off:
+            reward -= 2
+            self.fell_off = True
 
         if terminated or truncated:
             if info["flag_get"]:
-                reward += 50
-            else:
-                reward -= 50
-
-        reward /= 10
+                reward += 5
+            elif not self.fell_off:
+                reward -= 5
 
         return state, reward, terminated, truncated, info
 
