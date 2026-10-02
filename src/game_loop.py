@@ -3,8 +3,8 @@ from typing import Dict, Optional
 
 import mlflow
 import numpy as np
-from gym.core import ObsType
-from gym.vector import AsyncVectorEnv
+from gymnasium.core import ObsType
+from gymnasium.vector import AsyncVectorEnv
 
 from agents import Agent
 from reward_trackers import RewardTracker
@@ -32,14 +32,14 @@ class GameLoop:
         self.env.reset_async()
         self.current_states, _ = self.env.reset_wait()
 
-    def log_episode_stats(self, metrics: Dict) -> None:
-        reward = metrics["episode"]["r"]
+    def log_episode_stats(self, metrics: Dict, worker: int) -> None:
+        reward = float(metrics["episode"]["r"][worker])
         for tracker in self.reward_trackers.values():
             tracker.record_reward(reward)
 
         mlflow.log_metric("episode_reward", reward, step=self.total_episodes_finished)
-        mlflow.log_metric("episode_length", metrics["episode"]["l"], step=self.total_episodes_finished)
-        mlflow.log_metric("episode_x_pos", metrics["x_pos"], step=self.total_episodes_finished)
+        mlflow.log_metric("episode_length", int(metrics["episode"]["l"][worker]), step=self.total_episodes_finished)
+        mlflow.log_metric("episode_x_pos", int(metrics["x_pos"][worker]), step=self.total_episodes_finished)
 
         self.total_episodes_finished += 1
 
@@ -65,7 +65,7 @@ class GameLoop:
 
         if log_stats and "final_info" in metrics:
             for w in [w for w, done in enumerate(dones) if done]:
-                self.log_episode_stats(metrics["final_info"][w])
+                self.log_episode_stats(metrics["final_info"], w)
 
         return all(dones)
 

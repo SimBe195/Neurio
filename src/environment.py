@@ -2,23 +2,21 @@ import logging
 from typing import Any, Dict, Literal, Optional, Tuple, Union
 
 import cv2
-import gym.logger
 import gym_super_mario_bros
+import gymnasium.logger
 import numpy as np
 import numpy.typing as npt
 from dataclasses import dataclass
-from gym.core import Env, ObservationWrapper, Wrapper
-from gym.spaces import Box, Discrete, MultiDiscrete
-from gym.vector import AsyncVectorEnv
-from gym.wrappers.frame_stack import FrameStack
-from gym.wrappers.gray_scale_observation import GrayScaleObservation
-from gym.wrappers.record_episode_statistics import RecordEpisodeStatistics
+from gymnasium.core import Env, ObservationWrapper, Wrapper
+from gymnasium.spaces import Box, Discrete, MultiDiscrete
+from gymnasium.vector import AsyncVectorEnv, AutoresetMode
+from gymnasium.wrappers import FrameStackObservation, GrayscaleObservation, RecordEpisodeStatistics
 from gym_super_mario_bros.actions import COMPLEX_MOVEMENT, SIMPLE_MOVEMENT
 from nes_py.wrappers import JoypadSpace
 
 from config.environment import EnvironmentConfig
 
-gym.logger.set_level(logging.ERROR)
+gymnasium.logger.min_level = logging.ERROR
 
 BASE_WIDTH = 256
 BASE_HEIGHT = 240
@@ -52,7 +50,6 @@ class BaseEnvironment(JoypadSpace):
         super().__init__(
             gym_super_mario_bros.make(  # type: ignore
                 name,
-                apply_api_compatibility=True,
                 render_mode=render_mode,
             ),
             COMPLEX_MOVEMENT if config.complex_movement else SIMPLE_MOVEMENT,
@@ -150,7 +147,7 @@ class SubsampleWrapper(ObservationWrapper):
         :param observation: The original observation
         :return: The sub-sampled observation
         """
-        result = cv2.resize(observation, (self.height, self.width))
+        result = cv2.resize(observation, (self.width, self.height))
         if len(result.shape) == 2:
             result = np.expand_dims(result, -1)
         return result
@@ -207,16 +204,18 @@ class CustomRewardWrapper(Wrapper):
         self.prev_action = -1
         self.fell_off = False
 
-    def reset(self) -> Tuple[npt.NDArray, dict]:
+    def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None) -> Tuple[npt.NDArray, dict]:
         """
         Reset the environment and the current score.
 
+        :param seed: Optional seed for the environment's RNG
+        :param options: Optional reset options
         :return: The initial state and information
         """
         self.prev_y_pos = float("inf")
         self.prev_action = -1
         self.fell_off = False
-        return super().reset()
+        return super().reset(seed=seed, options=options)
 
     def step(self, action: int) -> StepType:
         """
@@ -262,12 +261,12 @@ def get_environment(
     """
     env = BaseEnvironment(config, **kwargs)
     if config.grayscale:
-        env = GrayScaleObservation(env, keep_dim=True)
+        env = GrayscaleObservation(env, keep_dim=True)
     env = ClipWrapper(config, env)
     env = SubsampleWrapper(config, env)
     env = CustomRewardWrapper(env)
     env = ActionRepeatWrapper(config, env)
-    env = FrameStack(env, config.num_stack_frames)
+    env = FrameStackObservation(env, config.num_stack_frames)
     env = RecordEpisodeStatistics(env)
     return env
 
@@ -284,6 +283,7 @@ def get_multiprocess_environment(num_environments: int, *args, **kwargs) -> Asyn
     return AsyncVectorEnv(
         [lambda: get_environment(*args, **kwargs) for _ in range(num_environments)],
         copy=False,
+        autoreset_mode=AutoresetMode.SAME_STEP,
     )
 
 

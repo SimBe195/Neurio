@@ -5,6 +5,8 @@ __pychache__/
 .hypothesis/
 outputs/
 mlruns/
+mlflow.db
 multirun/
 optuna_studies/
 recordings/
+.venv/

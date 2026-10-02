@@ -26,13 +26,13 @@ log = logging.getLogger(__name__)
 @hydra.main(version_base="1.3", config_path="../configs", config_name="neurio_config")
 def main(config: NeurioConfig) -> float:
     config = instantiate(config)
+    mlflow.set_tracking_uri(f"sqlite:///{hydra.utils.get_original_cwd()}/mlflow.db")
     study_name = f"Neurio-lev-{config.level}"
     if (experiment := mlflow.get_experiment_by_name(study_name)) is not None:
         exp_id = experiment.experiment_id
     else:
         exp_id = mlflow.create_experiment(study_name)
 
-    mlflow.set_tracking_uri(f"file://{hydra.utils.get_original_cwd()}/mlruns")
     with mlflow.start_run(experiment_id=exp_id):
         mlflow.log_params(flatten(asdict(config)))
         level = config.level

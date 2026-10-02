@@ -18,6 +18,7 @@ log = logging.getLogger(__name__)
 @hydra.main(version_base="1.3", config_path="../configs", config_name="neurio_config")
 def main(config: NeurioConfig) -> None:
     config = instantiate(config)
+    mlflow.set_tracking_uri(f"sqlite:///{hydra.utils.get_original_cwd()}/mlflow.db")
     if config.test_run_id is not None:
         run = mlflow.get_run(config.test_run_id)
         log.info(f"Loading run with run_id {run.info.run_id}")
