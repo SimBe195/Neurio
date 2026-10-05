@@ -1,5 +1,3 @@
-from typing import List
-
 import torch
 import torch.nn as nn
 from jaxtyping import Float
@@ -11,9 +9,9 @@ class ConvEncoder(nn.Module):
     def __init__(
         self,
         env_info: EnvironmentInfo,
-        num_filters: List[int],
-        kernel_sizes: List[int],
-        strides: List[int],
+        num_filters: list[int],
+        kernel_sizes: list[int],
+        strides: list[int],
         fc_size: int,
     ) -> None:
         super().__init__()
@@ -22,7 +20,7 @@ class ConvEncoder(nn.Module):
         prev_filters = env_info.total_channel_dim
         conv_width = env_info.width
         conv_height = env_info.height
-        for n_f, k_s, stride in zip(num_filters, kernel_sizes, strides):
+        for n_f, k_s, stride in zip(num_filters, kernel_sizes, strides, strict=True):
             padding = (k_s - 1) // 2
             self.conv_layers.append(nn.Conv2d(prev_filters, n_f, k_s, stride, padding=padding))
             self.conv_layers.append(nn.ReLU())

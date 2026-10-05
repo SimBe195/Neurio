@@ -13,6 +13,7 @@ class EnvironmentConfig:
     clip_left: int
     clip_right: int
     subsampling_factor: float
+    reward_scale: float
 
     def __post_init__(self) -> None:
         assert self.num_repeat_frames >= 1
@@ -22,3 +23,4 @@ class EnvironmentConfig:
         assert self.clip_left >= 0
         assert self.clip_right >= 0
         assert self.subsampling_factor >= 1
+        assert self.reward_scale > 0

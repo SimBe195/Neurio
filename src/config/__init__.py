@@ -1,6 +1,5 @@
-from .agent import *
-from .environment import *
-from .learning_rate import *
-from .main_config import *
-from .model import *
-from .util import *
+from .agent import AgentConfig
+from .main_config import NeurioConfig
+from .util import flatten
+
+__all__ = ["AgentConfig", "NeurioConfig", "flatten"]

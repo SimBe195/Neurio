@@ -1,72 +1,96 @@
 import logging
+import re
 
 import hydra
 import mlflow
 import pandas
+from hydra.core.hydra_config import HydraConfig
 from hydra.utils import instantiate
+from omegaconf import DictConfig, OmegaConf
 
 from agents import get_agent
-from config import NeurioConfig, unflatten
-from config import update_config_with_dict
+from config import NeurioConfig
 from environment import get_env_info, get_multiprocess_environment
 from game_loop import GameLoop
+from train import CONFIG_ARTIFACT, get_experiment_name, load_run_config
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
 
-@hydra.main(version_base="1.3", config_path="../configs", config_name="neurio_config")
-def main(config: NeurioConfig) -> None:
-    config = instantiate(config)
-    mlflow.set_tracking_uri(f"sqlite:///{hydra.utils.get_original_cwd()}/mlflow.db")
-    if config.test_run_id is not None:
-        run = mlflow.get_run(config.test_run_id)
-        log.info(f"Loading run with run_id {run.info.run_id}")
+def find_best_run_id(config: NeurioConfig) -> str:
+    """The run with the best final objective in the experiment of the configured level mode."""
+    runs = mlflow.search_runs(experiment_names=[get_experiment_name(config)], output_format="pandas")
+    assert isinstance(runs, pandas.DataFrame)
+    metric = f"metrics.{config.objective}"
+    assert metric in runs and runs[metric].notna().any(), f"No runs with {config.objective} found."
+    best = runs.loc[runs[metric].idxmax()]
+    log.info(f"Best run is {best['run_id']} with {config.objective} {best[metric]:.3f}.")
+    return best["run_id"]
+
+
+def latest_checkpoint_iter(run_id: str) -> int:
+    pattern = re.compile(r"actor_critic-(\d+)")
+    iters = [
+        int(match.group(1))
+        for artifact in mlflow.MlflowClient().list_artifacts(run_id)
+        if (match := pattern.fullmatch(artifact.path))
+    ]
+    assert iters, f"Run {run_id} has no checkpoints."
+    return max(iters)
+
+
+def evaluation_config(run_id: str, cli_cfg: DictConfig, levels_overridden: bool) -> NeurioConfig:
+    """
+    The run's own config for a single, greedily acting worker, on the levels from the command line if given, else on
+    the full game.
+    """
+    try:
+        run_cfg = load_run_config(run_id)
+    except Exception as e:
+        raise RuntimeError(f"Could not load {CONFIG_ARTIFACT} of run {run_id}, runs of older versions lack it.") from e
+    run_cfg.num_workers = 1
+    if levels_overridden:
+        run_cfg.levels = cli_cfg.levels
     else:
-        runs_df = mlflow.search_runs(
-            experiment_names=[f"Neurio-lev-{config.level}"],
-            output_format="pandas",
+        run_cfg.levels = OmegaConf.create({"_target_": "config.levels.ProgressionLevelsConfig"})
+    if "sampling_strategy" in run_cfg.agent:
+        run_cfg.agent.sampling_strategy = OmegaConf.create(
+            {"_target_": "config.sampling_strategy.GreedySamplingStrategy"}
         )
-        assert isinstance(runs_df, pandas.DataFrame)
-        log.info("Finding best run.")
-        rewards = runs_df["metrics.best_sum_avg_rewards"]
-        run = mlflow.get_run(runs_df.loc[rewards.idxmax()]["run_id"])
-        log.info(f"Loading best run with run_id {run.info.run_id} and metric {rewards.max()}.")
+    return instantiate(run_cfg, _convert_="all")
 
-    with mlflow.start_run(run_id=run.info.run_id):
-        log.info("Update config with run parameters.")
-        run_params = unflatten(run.data.params)
-        run_params.pop("test_iter")
-        update_config_with_dict(config, run_params, log)
 
-        log.info("Set num_workers to 1")
-        config.num_workers = 1
+@hydra.main(version_base="1.3", config_path="../configs", config_name="neurio_config")
+def main(cfg: DictConfig) -> None:
+    """
+    Watch a trained agent play one episode. By default, it plays the full game from 1-1 and continues after each flag
+    until Mario loses a life; levels given on the command line replace that, e.g. `levels=single levels.level=1-3`.
+    The agent always takes its most likely action, so the episode is deterministic.
 
-        level = config.level
+    Plays the best run of the experiment of the configured level mode, or `test_run_id`, at the checkpoint `test_iter`,
+    by default the latest one.
+    """
+    cli_config: NeurioConfig = instantiate(cfg, _convert_="all")
+    mlflow.set_tracking_uri(cli_config.tracking_uri)
+    run_id = cli_config.test_run_id or find_best_run_id(cli_config)
+    levels_overridden = any(o.lstrip("+~").startswith("levels") for o in HydraConfig.get().overrides.task)
+    config = evaluation_config(run_id, cfg, levels_overridden)
 
-        # Create env
-        env = get_multiprocess_environment(
-            num_environments=config.num_workers,
-            config=config.environment,
-            level=level,
-            render_mode="human",
-        )
-
-        # Set up agent
+    env = get_multiprocess_environment(1, config.environment, config.levels, render_mode="human")
+    try:
+        if (distribution := config.levels.evaluation_distribution()) is not None:
+            env.call("set_level_distribution", *distribution)
         agent = get_agent(config.agent, get_env_info(env))
+        test_iter = cli_config.test_iter if cli_config.test_iter is not None else latest_checkpoint_iter(run_id)
+        log.info(f"Eval run {run_id} at iter {test_iter} on levels {config.levels.name}.")
+        agent.load(run_id, test_iter)
 
-        # Load checkpoint
-        log.info(f"Eval trained model on level {level}.")
-        if config.test_iter is not None:
-            log.info(f"Loading checkpoint at iter {config.test_iter}.")
-            agent.load(config.test_iter)
-        else:
-            log.info(f"Loading checkpoint at iter {config.num_iters}.")
-            agent.load(config.num_iters)
-
-        GameLoop(env, agent).run_test_loop(framerate=60 // config.environment.num_repeat_frames)
-
-        log.info("Done evaluating. Exiting now.")
+        episode = GameLoop(env, agent).run_test_episode()
+        result = "with the flag" if episode.flag_get else "without the flag"
+        log.info(f"Ended on {episode.level} at x {episode.x_pos} {result}, reward {episode.reward:.1f}.")
+    finally:
+        env.close()
 
 
 if __name__ == "__main__":

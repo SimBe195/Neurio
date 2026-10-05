@@ -1,28 +1,35 @@
 import logging
-from typing import Any, Dict, Literal, Optional, Tuple, Union
+import time
+from dataclasses import dataclass
+from typing import Any, Literal, SupportsFloat
 
 import cv2
 import gym_super_mario_bros
+import gymnasium
 import gymnasium.logger
 import numpy as np
 import numpy.typing as npt
-from dataclasses import dataclass
-from gymnasium.core import Env, ObservationWrapper, Wrapper
-from gymnasium.spaces import Box, Discrete, MultiDiscrete
-from gymnasium.vector import AsyncVectorEnv, AutoresetMode
-from gymnasium.wrappers import FrameStackObservation, GrayscaleObservation, RecordEpisodeStatistics
 from gym_super_mario_bros.actions import COMPLEX_MOVEMENT, SIMPLE_MOVEMENT
+from gymnasium.core import Env, ObservationWrapper, RenderFrame, Wrapper
+from gymnasium.spaces import Box, Discrete, MultiDiscrete
+from gymnasium.vector import AsyncVectorEnv, AutoresetMode, VectorEnv
+from gymnasium.wrappers import FrameStackObservation, GrayscaleObservation, RecordEpisodeStatistics, TransformReward
 from nes_py.wrappers import JoypadSpace
 
 from config.environment import EnvironmentConfig
+from config.levels import LevelConfig, ProgressionLevelsConfig
 
-gymnasium.logger.min_level = logging.ERROR
+# gymnasium annotates the level with its default value, so type checkers reject any other
+gymnasium.logger.min_level = logging.ERROR  # ty: ignore[invalid-assignment]
 
 BASE_WIDTH = 256
 BASE_HEIGHT = 240
 
+# "human" shows the game in a window in real time, "rgb_array" makes frames available through render()
+RenderMode = Literal["human", "rgb_array"]
 
-StepType = Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]
+
+StepType = tuple[Any, SupportsFloat, bool, bool, dict[str, Any]]
 
 
 class BaseEnvironment(JoypadSpace):
@@ -36,7 +43,7 @@ class BaseEnvironment(JoypadSpace):
         self,
         config: EnvironmentConfig,
         level: str,
-        render_mode: Optional[Union[Literal["human"], Literal["rgb_array"]]] = None,
+        render_mode: RenderMode | None = None,
     ) -> None:
         """
         Constructor for the BaseEnvironment.
@@ -48,12 +55,136 @@ class BaseEnvironment(JoypadSpace):
         if level:
             name = name.replace("Bros-v", f"Bros-{level}-v")
         super().__init__(
-            gym_super_mario_bros.make(  # type: ignore
+            gym_super_mario_bros.make(
                 name,
                 render_mode=render_mode,
             ),
             COMPLEX_MOVEMENT if config.complex_movement else SIMPLE_MOVEMENT,
         )
+
+
+class LevelSelectEnv(gymnasium.Env):
+    """
+    Plays each episode on a level sampled from a configurable distribution. One emulator per level is created lazily
+    and kept, since switching the level of an existing emulator is not supported.
+    The distribution can be changed during training, e.g. via `AsyncVectorEnv.call("set_level_distribution", ...)`.
+    """
+
+    def __init__(
+        self,
+        config: EnvironmentConfig,
+        levels: list[str],
+        weights: list[float],
+        render_mode: RenderMode | None = None,
+    ) -> None:
+        self.config = config
+        self.render_mode = render_mode
+        self._emulator_render_mode = render_mode
+        self._envs: dict[str, BaseEnvironment] = {}
+        self.set_level_distribution(levels, weights)
+        self.current_level = levels[0]
+        first_env = self._get_env(self.current_level)
+        self.observation_space = first_env.observation_space
+        self.action_space = first_env.action_space
+
+    def set_level_distribution(self, levels: list[str], weights: list[float]) -> None:
+        assert len(levels) == len(weights) > 0
+        assert np.isclose(sum(weights), 1.0), "Level weights must sum to 1."
+        self.levels = list(levels)
+        self.weights = np.asarray(weights, dtype=np.float64)
+
+    def _get_env(self, level: str) -> BaseEnvironment:
+        if level not in self._envs:
+            self._envs[level] = BaseEnvironment(self.config, level=level, render_mode=self._emulator_render_mode)
+        return self._envs[level]
+
+    def reset(self, *, seed: int | None = None, options: dict | None = None) -> tuple[npt.NDArray, dict]:
+        super().reset(seed=seed)
+        self.current_level = self.levels[self.np_random.choice(len(self.levels), p=self.weights)]
+        observation, info = self._get_env(self.current_level).reset(seed=seed)
+        return observation, info
+
+    def step(self, action: int) -> StepType:
+        return self._get_env(self.current_level).step(action)
+
+    def render(self) -> RenderFrame | list[RenderFrame] | None:
+        return self._get_env(self.current_level).render()
+
+    def close(self) -> None:
+        for env in self._envs.values():
+            env.close()
+
+
+class EndOnLifeLossWrapper(Wrapper):
+    """
+    Ends the episode as soon as Mario dies. Used for the full game, which would otherwise continue until all lives
+    are lost.
+    """
+
+    def step(self, action: int) -> StepType:
+        state, reward, terminated, truncated, info = super().step(action)
+        if info["is_dying"] or info["is_dead"]:
+            terminated = True
+        return state, reward, terminated, truncated, info
+
+
+def get_base_environment(
+    config: EnvironmentConfig,
+    levels: LevelConfig,
+    render_mode: RenderMode | None = None,
+) -> Env:
+    """
+    Create the unprocessed game environment for the given level configuration.
+    """
+    if isinstance(levels, ProgressionLevelsConfig):
+        return EndOnLifeLossWrapper(BaseEnvironment(config, level="", render_mode=render_mode))
+    distribution = levels.initial_distribution()
+    assert distribution is not None
+    return LevelSelectEnv(config, *distribution, render_mode=render_mode)
+
+
+class GameViewerWrapper(Wrapper):
+    """
+    Shows the game in a window at the NES frame rate, for watching the agent play. Wraps the unprocessed game, which
+    must use render mode "rgb_array", so that every emulated frame is shown in one window for all levels.
+    """
+
+    FRAMES_PER_SECOND = 60
+
+    def __init__(self, env: Env, scale: int = 3) -> None:
+        super().__init__(env)
+        self.scale = scale
+        self.viewer = None
+        self._next_frame_time = 0.0
+
+    def _show(self) -> None:
+        if self.viewer is None:
+            # Imported here since it needs a display
+            from nes_py._image_viewer import ImageViewer
+
+            self.viewer = ImageViewer("Neurio", height=BASE_HEIGHT * self.scale, width=BASE_WIDTH * self.scale)
+        self.viewer.show(self.env.render())
+        # Wait for the frame's turn, without catching up on frames that were late
+        now = time.perf_counter()
+        if self._next_frame_time > now:
+            time.sleep(self._next_frame_time - now)
+        self._next_frame_time = max(now, self._next_frame_time) + 1 / self.FRAMES_PER_SECOND
+
+    def reset(self, *, seed: int | None = None, options: dict | None = None) -> tuple[npt.NDArray, dict]:
+        result = super().reset(seed=seed, options=options)
+        self._show()
+        return result
+
+    def step(self, action: int) -> StepType:
+        result = super().step(action)
+        self._show()
+        return result
+
+    def close(self) -> None:
+        if self.viewer is not None:
+            self.viewer.close()
+            self.viewer = None
+        super().close()
 
 
 class ClipWrapper(ObservationWrapper):
@@ -178,110 +309,53 @@ class ActionRepeatWrapper(Wrapper):
         :return: The state, total reward, termination and truncation flags, and metrics
         """
         state, reward, terminated, truncated, metrics = super().step(action)
-        total_reward = reward
+        total_reward = float(reward)
         for _ in range(self.num_repeat_frames - 1):
             if terminated or truncated:
                 break
             state, reward, terminated, truncated, metrics = super().step(action)
-            total_reward += reward
+            total_reward += float(reward)
         return state, total_reward, terminated, truncated, metrics
-
-
-class CustomRewardWrapper(Wrapper):
-    """
-    This class represents a wrapper for the game environment that computes a custom reward based on the score.
-    """
-
-    def __init__(self, *args, **kwargs) -> None:
-        """
-        Constructor for the CustomRewardWrapper.
-
-        :param args: Positional arguments
-        :param kwargs: Additional arguments
-        """
-        super().__init__(*args, **kwargs)
-        self.prev_y_pos = float("inf")
-        self.prev_action = -1
-        self.fell_off = False
-
-    def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None) -> Tuple[npt.NDArray, dict]:
-        """
-        Reset the environment and the current score.
-
-        :param seed: Optional seed for the environment's RNG
-        :param options: Optional reset options
-        :return: The initial state and information
-        """
-        self.prev_y_pos = float("inf")
-        self.prev_action = -1
-        self.fell_off = False
-        return super().reset(seed=seed, options=options)
-
-    def step(self, action: int) -> StepType:
-        """
-        Perform the action and compute the custom reward.
-
-        :param action: The action to be performed
-        :return: The state, custom reward, termination and truncation flags, and info
-        """
-        state, reward, terminated, truncated, info = super().step(action)
-
-        reward /= 10
-
-        reward += max(0, info["y_pos"] - self.prev_y_pos) / 20
-        reward += (self.prev_action == action) / 20
-
-        self.prev_y_pos = info["y_pos"]
-        self.prev_action = action
-
-        if info["y_pos"] < 79 and not self.fell_off:
-            reward -= 2
-            self.fell_off = True
-
-        if terminated or truncated:
-            if info["flag_get"]:
-                reward += 5
-            elif not self.fell_off:
-                reward -= 5
-
-        return state, reward, terminated, truncated, info
 
 
 def get_environment(
     config: EnvironmentConfig,
-    **kwargs,
+    levels: LevelConfig,
+    render_mode: RenderMode | None = None,
 ) -> Env:
     """
     Set up the game environment with the given configuration.
-    This includes several wrappers for preprocessing observations and actions.
+    This includes several wrappers for preprocessing observations, actions and rewards.
 
     :param config: Configuration for the environment
-    :param kwargs: Additional arguments
+    :param levels: Configuration of the levels to play
+    :param render_mode: See RenderMode
     :return: The wrapped environment
     """
-    env = BaseEnvironment(config, **kwargs)
+    if render_mode == "human":
+        env = GameViewerWrapper(get_base_environment(config, levels, render_mode="rgb_array"))
+    else:
+        env = get_base_environment(config, levels, render_mode=render_mode)
     if config.grayscale:
         env = GrayscaleObservation(env, keep_dim=True)
     env = ClipWrapper(config, env)
     env = SubsampleWrapper(config, env)
-    env = CustomRewardWrapper(env)
+    env = TransformReward(env, lambda reward: float(reward) * config.reward_scale)
     env = ActionRepeatWrapper(config, env)
     env = FrameStackObservation(env, config.num_stack_frames)
     env = RecordEpisodeStatistics(env)
     return env
 
 
-def get_multiprocess_environment(num_environments: int, *args, **kwargs) -> AsyncVectorEnv:
-    """
-    Set up a multiprocess game environment.
-
-    :param num_environments: Number of parallel environments
-    :param args: Positional arguments for get_environment()
-    :param kwargs: Keyword arguments for get_environment()
-    :return: The vectorized environment
-    """
+def get_multiprocess_environment(
+    num_environments: int,
+    config: EnvironmentConfig,
+    levels: LevelConfig,
+    render_mode: RenderMode | None = None,
+) -> AsyncVectorEnv:
+    """The game environments of all workers, each in its own process."""
     return AsyncVectorEnv(
-        [lambda: get_environment(*args, **kwargs) for _ in range(num_environments)],
+        [lambda: get_environment(config, levels, render_mode) for _ in range(num_environments)],
         copy=False,
         autoreset_mode=AutoresetMode.SAME_STEP,
     )
@@ -301,7 +375,7 @@ class EnvironmentInfo:
         return self.stack_frames * self.image_channels
 
 
-def get_env_info(env: Env) -> EnvironmentInfo:
+def get_env_info(env: Env | VectorEnv) -> EnvironmentInfo:
     """
     Get information about the game environment.
 
@@ -313,21 +387,15 @@ def get_env_info(env: Env) -> EnvironmentInfo:
     assert len(obs_space) >= 3, "Observation space dimensions are not sufficient."
 
     height, width, channels = obs_space[-3:]
-    if len(obs_space) >= 4:
-        stack_frames = obs_space[-4]
-    else:
-        stack_frames = 1
+    stack_frames = obs_space[-4] if len(obs_space) >= 4 else 1
 
     act_space = env.action_space
     if isinstance(act_space, Discrete):
-        num_actions = act_space.n
+        num_actions = int(act_space.n)
     else:
         assert isinstance(act_space, MultiDiscrete), "Action space type not supported."
-        num_actions = act_space.nvec[0]
+        num_actions = int(act_space.nvec[0])
 
-    if isinstance(env, AsyncVectorEnv):
-        num_workers = env.num_envs
-    else:
-        num_workers = 1
+    num_workers = env.num_envs if isinstance(env, AsyncVectorEnv) else 1
 
     return EnvironmentInfo(width, height, stack_frames, channels, num_actions, num_workers)

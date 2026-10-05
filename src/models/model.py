@@ -1,5 +1,4 @@
 from abc import abstractmethod
-from typing import Tuple
 
 import torch
 from jaxtyping import Float, Int64
@@ -21,5 +20,7 @@ class Model(torch.nn.Module):
     @abstractmethod
     def forward(
         self, x: Float[torch.Tensor, "*batch channel height width"], prev_actions: Int64[torch.Tensor, "*batch"]
-    ) -> Tuple[Float[torch.Tensor, "*batch action"], Float[torch.Tensor, "*batch"]]:
-        ...
+    ) -> tuple[Float[torch.Tensor, "*batch action"], Float[torch.Tensor, "*batch"]]:
+        """
+        :return: Action logits and state values
+        """

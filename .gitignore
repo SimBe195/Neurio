@@ -1,4 +1,4 @@
-__pychache__/
+__pycache__/
 *.py[cod]
 .vscode/
 .idea
@@ -8,5 +8,9 @@ mlruns/
 mlflow.db
 multirun/
 optuna_studies/
+optuna.db
 recordings/
 .venv/
+overnight/
+*.log
+.coverage

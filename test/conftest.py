@@ -1,0 +1,7 @@
+from jaxtyping import install_import_hook
+
+# Runtime-check the jaxtyping annotations of these modules during tests. Installed before any test imports them.
+# agents.advantage is excluded on purpose since its tests expect its own ValueErrors on malformed inputs.
+install_import_hook(
+    ["agents.ppo_agent", "agents.experience_buffer", "agents.self_imitation", "models"], "beartype.beartype"
+)

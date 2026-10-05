@@ -1,39 +1,32 @@
 defaults:
   - agent: ppo
   - environment: subsampled
-  - override hydra/sweeper: optuna
-  - override hydra/sweeper/sampler: tpe
+  - levels: curriculum
   - _self_
 
 _target_: config.main_config.NeurioConfig
-level: "1-1"
 num_workers: 32
-num_iters: 500
+num_iters: 5000
 steps_per_iter: 128
-save_frequency: 50
+save_frequency: 100
 render: False
+# Relative paths are resolved against the directory training is started from
+tracking_uri: sqlite:///mlflow.db
+# The training objective, e.g. for hyperparameter search, is the mean reward of this many most recent episodes
+objective_window: 100
+# The objective, e.g. for hyperparameter search: recent_mean_reward, or levels_cleared_score for curricula
+objective: recent_mean_reward
+# Curiosity driven exploration, see config.exploration.ExplorationConfig. A bonus_scale of 0 disables it.
+exploration:
+  _target_: config.exploration.ExplorationConfig
+  bonus_scale: 0.5
+  cell_size: 16
+# mlflow tags of the run, add some with +tags.<name>=<value>
+tags: {}
+# Evaluation with test.py: run to load (default: the best of the experiment) and checkpoint (default: the latest)
+test_run_id: null
+test_iter: null
 
 agent:
   total_updates: ${num_iters}
-
-  learning_rate:
-    decay_iters: ${num_iters}
-
-#hydra:
-#  sweeper:
-#    # ToDo: Add pruner as soon as it's available in the optuna sweeper
-#    sampler:
-#      n_startup_trials: 10
-#    direction: maximize
-#    study_name: Neurio-lev-${level}
-#    storage: sqlite:///optuna_studies/${hydra.sweeper.study_name}.db
-#    n_trials: 1
-#    n_jobs: 1
-#
-#    params:
-#      agent.learning_rate.learning_rate: tag(log, interval(0.0002, 0.0009))
-#      agent.exp_buffer_size: choice(128, 256)
-#      agent.batch_size: choice(64, 128, 256, 512)
-#      agent.max_entropy_loss_weight: tag(log, interval(0.0001, 0.01))
-#      agent.gamma: interval(0.8, 1.0)
-#      agent.tau: interval(0.8, 1.0)
+  exp_buffer_size: ${steps_per_iter}

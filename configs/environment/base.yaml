@@ -3,10 +3,12 @@ _target_: config.environment.EnvironmentConfig
 env_name: SuperMarioBros-v0
 complex_movement: True
 num_repeat_frames: 4
-num_stack_frames: 2
+num_stack_frames: 4
 clip_top: 0
 clip_bot: 0
 clip_left: 0
 clip_right: 0
 subsampling_factor: 1
 grayscale: True
+# Scale of the game's reward, which is mostly 0-5 per frame for progress, -25 for dying and 50 for the flag
+reward_scale: 0.1

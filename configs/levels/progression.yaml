@@ -1,0 +1,2 @@
+# Full game from 1-1, continuing with the next level after each flag until Mario loses a life
+_target_: config.levels.ProgressionLevelsConfig

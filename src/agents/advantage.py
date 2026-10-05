@@ -1,8 +1,7 @@
-from typing import Tuple
+from dataclasses import dataclass
 
 import torch
-from dataclasses import dataclass
-from jaxtyping import Float
+from jaxtyping import Float, Real
 
 
 @dataclass
@@ -26,10 +25,10 @@ class GaeEstimator:
 
     def get_advantage_returns(
         self,
-        rewards: Float[torch.Tensor, "buffer *worker"],
-        values: Float[torch.Tensor, "buffer+1 *worker"],
-        dones: Float[torch.Tensor, "buffer *worker"],
-    ) -> Tuple[Float[torch.Tensor, "buffer *worker"], Float[torch.Tensor, "buffer *worker"]]:
+        rewards: Float[torch.Tensor, " buffer *worker"],
+        values: Float[torch.Tensor, " buffer+1 *worker"],
+        dones: Real[torch.Tensor, " buffer *worker"],
+    ) -> tuple[Float[torch.Tensor, " buffer *worker"], Float[torch.Tensor, " buffer *worker"]]:
         """
         Calculate the Generalized Advantage Estimation (GAE) and returns.
 
@@ -58,7 +57,7 @@ class GaeEstimator:
 
         advantages = torch.zeros_like(rewards)
         gae = 0
-        for t, (done, delta) in reversed(list(enumerate(zip(dones, deltas)))):
+        for t, (done, delta) in reversed(list(enumerate(zip(dones, deltas, strict=True)))):
             gae = delta + self.gamma * self.tau * (1 - done) * gae
             advantages[t] = gae
 
