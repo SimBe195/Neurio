@@ -8,7 +8,7 @@ from agents import PPOAgent, StepOutcome
 from agents.advantage import GaeEstimator
 from config.agent import PPOAgentConfig
 from config.learning_rate import ConstantLRConfig
-from config.model import ActorCriticConfig
+from config.model import NatureActorCriticConfig
 from config.sampling_strategy import (
     AdaptiveEpsilonGreedySamplingStrategy,
     DistSamplingStrategy,
@@ -31,7 +31,7 @@ def _make_agent(monkeypatch, **overrides) -> PPOAgent:
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     torch.manual_seed(0)
     config = PPOAgentConfig(
-        model=ActorCriticConfig(
+        model=NatureActorCriticConfig(
             action_embedding_size=4, num_filters=[4, 4], kernel_sizes=[3, 3], strides=[2, 1], fc_size=8
         ),
         learning_rate=ConstantLRConfig(learning_rate=1e-2),

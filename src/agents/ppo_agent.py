@@ -1,10 +1,13 @@
 import logging
+import tempfile
+from pathlib import Path
 
 import mlflow
 import numpy as np
 import torch
 import torchinfo
 from jaxtyping import Float, Int64, Shaped
+from torch.optim.lr_scheduler import LRScheduler
 from torch.utils.data import DataLoader, TensorDataset
 
 from config.agent import PPOAgentConfig
@@ -31,7 +34,9 @@ class PPOAgent(Agent):
         )
         self.sil_loss_weight = self.config.sil_loss_weight
         self.self_imitation = (
-            SelfImitationMemory(self.num_workers, self.config.gamma, self.config.sil_episodes_per_level)
+            SelfImitationMemory(
+                self.num_workers, self.config.gamma, self.config.sil_episodes_per_level, self.env_info.stack_frames
+            )
             if self.sil_loss_weight > 0
             else None
         )
@@ -53,6 +58,8 @@ class PPOAgent(Agent):
         if torch.cuda.is_available():
             self.device = torch.device("cuda")
             device_name = torch.cuda.get_device_name(self.device)
+            # The input size is fixed, so the fastest convolution algorithms can be chosen once
+            torch.backends.cudnn.benchmark = True
             log.info(f"Using GPU {device_name}")
         else:
             self.device = self.cpu
@@ -76,12 +83,25 @@ class PPOAgent(Agent):
 
         self.update_step = 0
 
-    def get_state_dicts(self) -> dict[str, dict]:
+    @property
+    def _checkpointed(self) -> dict[str, torch.nn.Module | torch.optim.Optimizer | LRScheduler]:
+        return {"actor_critic": self.actor_critic, "optimizer": self.opt, "scheduler": self.scheduler}
+
+    def state_dict(self) -> dict:
         return {
-            "actor_critic": self.actor_critic.state_dict(),
-            "optimizer": self.opt.state_dict(),
-            "scheduler": self.scheduler.state_dict(),
+            **{name: module.state_dict() for name, module in self._checkpointed.items()},
+            "update_step": self.update_step,
+            "sampling_strategy": self.sampling_strategy.state_dict(),
+            "self_imitation": self.self_imitation.state_dict() if self.self_imitation is not None else {},
         }
+
+    def load_state_dict(self, state: dict) -> None:
+        for name, module in self._checkpointed.items():
+            module.load_state_dict(state[name])
+        self.update_step = state["update_step"]
+        self.sampling_strategy.load_state_dict(state["sampling_strategy"])
+        if self.self_imitation is not None:
+            self.self_imitation.load_state_dict(state["self_imitation"])
 
     def _compute_probs_values(
         self,
@@ -151,21 +171,15 @@ class PPOAgent(Agent):
         self.experience_buffer.buffer_dones(torch.tensor(outcome.dones, device=self.device))
 
     def save(self, save_iter: int) -> None:
-        for name, module in [
-            ("actor_critic", self.actor_critic),
-            ("optimizer", self.opt),
-            ("scheduler", self.scheduler),
-        ]:
+        for name, module in self._checkpointed.items():
             mlflow.pytorch.log_state_dict(module.state_dict(), f"{name}-{save_iter:04d}")
 
     def load(self, run_id: str, load_iter: int) -> None:
-        for name, module in [
-            ("actor_critic", self.actor_critic),
-            ("optimizer", self.opt),
-            ("scheduler", self.scheduler),
-        ]:
-            state_dict = mlflow.pytorch.load_state_dict(f"runs:/{run_id}/{name}-{load_iter:04d}")
-            module.load_state_dict(state_dict)
+        # mlflow.pytorch.load_state_dict would leave each download behind in a temporary directory
+        with tempfile.TemporaryDirectory() as directory:
+            for name, module in self._checkpointed.items():
+                path = mlflow.artifacts.download_artifacts(f"runs:/{run_id}/{name}-{load_iter:04d}", dst_path=directory)
+                module.load_state_dict(torch.load(Path(path) / "state_dict.pth", weights_only=True))
 
     def _get_ext_values(self, v: Float[torch.Tensor, " worker"]) -> Float[torch.Tensor, "time worker"]:
         values = self.experience_buffer.get_value_buffer()
@@ -357,7 +371,7 @@ class PPOAgent(Agent):
             batch = self.self_imitation.sample(self.config.sil_batch_size)
             if batch is None:
                 break
-            states, prev_actions, actions, returns = batch
+            states, prev_actions, actions, returns = (tensor.to(self.device) for tensor in batch)
             logits, values = self.actor_critic.forward(states.to(torch.float32), prev_actions)
             advantages = torch.clamp(returns - values, min=0)
             weights = advantages.detach()

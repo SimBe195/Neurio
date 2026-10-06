@@ -5,7 +5,9 @@ from jaxtyping import Float
 from environment import EnvironmentInfo
 
 
-class ConvEncoder(nn.Module):
+class NatureEncoder(nn.Module):
+    """The convolutional encoder of DQN (Mnih et al., 2015), with a fully connected layer over the whole screen."""
+
     def __init__(
         self,
         env_info: EnvironmentInfo,

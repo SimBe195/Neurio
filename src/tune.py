@@ -3,8 +3,8 @@ Hyperparameter search with Optuna. Each trial is a regular training run that is 
 trials are stopped early based on the objective reported after each iteration.
 
 Usage:
-    uv run src/tune.py --study-name curriculum --search-space curriculum --hours 9 -- \
-        objective=levels_cleared_score num_iters=500
+    uv run src/tune.py --study-name mechanics --search-space exploration --hours 10 --warmup-iters 250 -- \
+        levels=tuning objective=mean_levels_cleared_score num_iters=700
 
 Everything after `--` are Hydra overrides applied to every trial. The study is stored in `--storage`, so it can be
 resumed by running the same command again, run from several processes at once, and inspected with
@@ -38,19 +38,19 @@ def suggest_ppo(trial: optuna.Trial) -> list[str]:
     ]
 
 
-def suggest_curriculum(trial: optuna.Trial) -> list[str]:
-    """Self-imitation and curiosity jointly with the main PPO settings, for the level curriculum."""
+def suggest_exploration(trial: optuna.Trial) -> list[str]:
+    """Self-imitation and curiosity jointly with the main PPO settings."""
     return [
         f"agent.sil_loss_weight={trial.suggest_float('sil_loss_weight', 0.1, 3.0, log=True)}",
         f"agent.sil_episodes_per_level={trial.suggest_int('sil_episodes_per_level', 4, 64, log=True)}",
         f"exploration.bonus_scale={trial.suggest_float('bonus_scale', 0.1, 2.0, log=True)}",
-        f"agent.gamma={trial.suggest_float('gamma', 0.95, 0.995)}",
+        f"agent.gamma={trial.suggest_float('gamma', 0.9, 0.995)}",
         f"agent.initial_entropy_loss_weight={trial.suggest_float('initial_entropy_loss_weight', 3e-3, 3e-2, log=True)}",
         f"agent.learning_rate.learning_rate={trial.suggest_float('learning_rate', 1e-4, 1e-3, log=True)}",
     ]
 
 
-SEARCH_SPACES = {"ppo": suggest_ppo, "curriculum": suggest_curriculum}
+SEARCH_SPACES = {"ppo": suggest_ppo, "exploration": suggest_exploration}
 
 
 def create_pruner(name: str, warmup_iters: int) -> optuna.pruners.BasePruner:
@@ -120,6 +120,8 @@ def main() -> None:
     study.optimize(
         lambda trial: objective(trial, args.study_name, args.overrides, args.search_space),
         n_trials=args.n_trials,
+        # A failing trial, e.g. out of memory, is marked as failed without stopping the study
+        catch=(Exception,),
         timeout=args.hours * 3600 if args.hours is not None else None,
     )
     if any(t.state == optuna.trial.TrialState.COMPLETE for t in study.trials):

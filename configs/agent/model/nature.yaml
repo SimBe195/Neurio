@@ -1,4 +1,5 @@
-_target_: config.model.ActorCriticConfig
+# The DQN encoder ("Nature CNN", Mnih et al., 2015)
+_target_: config.model.NatureActorCriticConfig
 
 action_embedding_size: 16
 num_filters: [32, 64, 64]

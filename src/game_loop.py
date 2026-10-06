@@ -149,6 +149,34 @@ class GameLoop:
         self.total_iters_finished += 1
         return metrics
 
+    def state_dict(self) -> dict:
+        """The progress of training, to resume it."""
+        return {
+            "agent": self.agent.state_dict(),
+            "level_scheduler": self.level_scheduler.state_dict() if self.level_scheduler is not None else {},
+            "novelty_bonus": self.novelty_bonus.state_dict() if self.novelty_bonus is not None else {},
+            "recent_rewards": list(self.recent_rewards),
+            "total_episodes_finished": self.total_episodes_finished,
+            "total_iters_finished": self.total_iters_finished,
+            "total_env_steps": self.total_env_steps,
+        }
+
+    def load_state_dict(self, state: dict) -> None:
+        """Restore the progress of training and restart the episodes on the restored level distribution."""
+        self.agent.load_state_dict(state["agent"])
+        if self.level_scheduler is not None:
+            self.level_scheduler.load_state_dict(state["level_scheduler"])
+            if (distribution := self.level_scheduler.distribution()) is not None:
+                self.env.call("set_level_distribution", *distribution)
+        if self.novelty_bonus is not None:
+            self.novelty_bonus.load_state_dict(state["novelty_bonus"])
+        self.recent_rewards.extend(state["recent_rewards"])
+        self.total_episodes_finished = state["total_episodes_finished"]
+        self.total_iters_finished = state["total_iters_finished"]
+        self.total_env_steps = state["total_env_steps"]
+        self.env.reset_async()
+        self.current_states = self.env.reset_wait()[0]
+
     def run_test_episode(self) -> EpisodeStats:
         """Play one episode without training. With render mode "human", the environment shows it in real time."""
         assert self.agent.num_workers == 1

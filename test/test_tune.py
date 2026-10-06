@@ -4,6 +4,7 @@ from hydra import compose, initialize_config_dir
 from hydra.utils import instantiate
 
 import tune
+from level_schedulers import get_level_scheduler
 from train import TrainResult
 
 
@@ -28,7 +29,7 @@ def test_search_space_composes_valid_configs():
     assert (agent.batch_size, agent.epochs_per_update) == (1024, 4)
 
 
-def test_curriculum_search_space_composes_valid_configs():
+def test_exploration_search_space_composes_valid_configs():
     params = {
         "sil_loss_weight": 1.0,
         "sil_episodes_per_level": 16,
@@ -37,7 +38,7 @@ def test_curriculum_search_space_composes_valid_configs():
         "initial_entropy_loss_weight": 0.01,
         "learning_rate": 7e-4,
     }
-    overrides = [*tune.suggest_curriculum(optuna.trial.FixedTrial(params)), "objective=levels_cleared_score"]
+    overrides = [*tune.suggest_exploration(optuna.trial.FixedTrial(params)), "objective=levels_cleared_score"]
     with initialize_config_dir(config_dir=tune.CONFIG_DIR, version_base="1.3"):
         config = instantiate(compose("neurio_config", overrides=overrides), _convert_="all")
 
@@ -67,7 +68,7 @@ def _run_trial(monkeypatch, pruner, reported):
 
     monkeypatch.setattr(tune, "train", fake_train)
     study = optuna.create_study(direction="maximize", pruner=pruner)
-    study.optimize(lambda trial: tune.objective(trial, "my-study", ["levels=single"], "curriculum"), n_trials=1)
+    study.optimize(lambda trial: tune.objective(trial, "my-study", ["levels=single"], "exploration"), n_trials=1)
     return study.trials[0], calls
 
 
@@ -101,3 +102,10 @@ def test_objective_prunes_trial(monkeypatch):
 )
 def test_create_pruner(name, expected):
     assert isinstance(tune.create_pruner(name, warmup_iters=10), expected)
+
+
+def test_tuning_levels_are_a_curriculum():
+    with initialize_config_dir(config_dir=tune.CONFIG_DIR, version_base="1.3"):
+        config = instantiate(compose("neurio_config", overrides=["levels=tuning"]), _convert_="all")
+    assert config.levels.levels == ["1-1", "1-3", "2-2", "4-1"]
+    assert get_level_scheduler(config.levels).distribution()[0] == ["1-1"]

@@ -15,8 +15,9 @@ from config.levels import ProgressionLevelsConfig
 from config.sampling_strategy import GreedySamplingStrategy
 from environment import get_env_info, get_environment
 from fakes import FakeMarioEnv
+from resume import RESUME_ITER_TAG, config_hash, find_resumable_run, load_training_state
 from test_game_loop import make_vector_env
-from train import CONFIG_ARTIFACT, Checkpoints, load_run_config, train
+from train import CONFIG_ARTIFACT, Checkpoints, load_run_config, setup_mlflow, train
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -46,6 +47,10 @@ def cfg(tmp_path, monkeypatch):
         "steps_per_iter=4",
         "save_frequency=2",
         "agent.batch_size=4",
+        # A tiny model keeps the checkpoints small
+        "agent.model.channels=[4,4]",
+        "agent.model.blocks_per_stage=1",
+        "agent.model.fc_size=16",
         f"tracking_uri=sqlite:///{tmp_path}/mlflow.db",
     ]
     with initialize_config_dir(config_dir=str(ROOT / "configs"), version_base="1.3"):
@@ -69,7 +74,7 @@ def test_train_logs_run(cfg):
     assert run.data.tags["overrides"] == " ".join(overrides)
     assert run.data.tags["purpose"] == "test"
     assert run.data.tags["from_config"] == "yes"
-    assert run.data.params["agent.gamma"] == "0.99"
+    assert run.data.params["agent.gamma"] == "0.95"
     assert {CONFIG_ARTIFACT, "actor_critic-0002", "actor_critic-0003"} <= set(_artifacts(result.run_id))
 
     history = mlflow.MlflowClient().get_metric_history(result.run_id, "recent_mean_reward")
@@ -113,8 +118,8 @@ def test_find_best_run(cfg):
     assert test_script.find_best_run_id(instantiate(cfg, _convert_="all")) == second.run_id
 
 
-def test_curriculum_keeps_best_checkpoint(cfg, monkeypatch):
-    cfg, overrides = cfg
+def _use_curriculum(cfg, monkeypatch):
+    """A curriculum over two levels, on which every episode reaches the flag."""
     monkeypatch.setattr(
         environment, "BaseEnvironment", lambda config, level, **_: FakeMarioEnv([10.0] * 3, level=level, flag_get=True)
     )
@@ -128,6 +133,11 @@ def test_curriculum_keeps_best_checkpoint(cfg, monkeypatch):
                 "levels.min_level_episodes=1",
             ],
         ).levels
+
+
+def test_curriculum_keeps_best_checkpoint(cfg, monkeypatch):
+    cfg, overrides = cfg
+    _use_curriculum(cfg, monkeypatch)
     result = train(cfg, overrides=overrides)
 
     run = mlflow.get_run(result.run_id)
@@ -139,29 +149,18 @@ def test_curriculum_keeps_best_checkpoint(cfg, monkeypatch):
     assert run.data.metrics["levels_cleared_score"] >= 1.0
 
 
-def test_levels_cleared_objective(cfg, monkeypatch):
+@pytest.mark.parametrize("objective", ["levels_cleared_score", "mean_levels_cleared_score"])
+def test_levels_cleared_objective(cfg, monkeypatch, objective):
     cfg, overrides = cfg
-    monkeypatch.setattr(
-        environment, "BaseEnvironment", lambda config, level, **_: FakeMarioEnv([10.0] * 3, level=level, flag_get=True)
-    )
-    with initialize_config_dir(config_dir=str(ROOT / "configs"), version_base="1.3"):
-        cfg.levels = compose(
-            "neurio_config",
-            overrides=[
-                "levels=curriculum",
-                "levels.levels=[1-1,1-2]",
-                "levels.success_window=2",
-                "levels.min_level_episodes=1",
-            ],
-        ).levels
-    cfg.objective = "levels_cleared_score"
+    _use_curriculum(cfg, monkeypatch)
+    cfg.objective = objective
     reported = []
     result = train(cfg, overrides=overrides, on_iteration=lambda i, value: reported.append(value) or False)
 
     # Every episode reaches the flag, so cleared levels count fully
     assert reported[0] == pytest.approx(1.0)
     assert result.objective == reported[-1] >= 1.0
-    assert mlflow.get_run(result.run_id).data.metrics["levels_cleared_score"] == pytest.approx(result.objective)
+    assert mlflow.get_run(result.run_id).data.metrics[objective] == pytest.approx(result.objective)
 
 
 class SavingAgent:
@@ -208,7 +207,7 @@ def test_evaluation_config(cfg):
     assert config.levels.name == "4-2"
 
 
-def test_load_checkpoint(cfg):
+def test_load_checkpoint(cfg, tmp_path):
     cfg, overrides = cfg
     run_id = train(cfg, overrides=overrides).run_id
     config = test_script.evaluation_config(run_id, cfg, levels_overridden=True)
@@ -219,6 +218,77 @@ def test_load_checkpoint(cfg):
         agent.load(run_id, test_script.latest_checkpoint_iter(run_id))
     finally:
         env.close()
-    trained = mlflow.pytorch.load_state_dict(f"runs:/{run_id}/actor_critic-0003")
+    path = mlflow.artifacts.download_artifacts(f"runs:/{run_id}/actor_critic-0003", dst_path=str(tmp_path))
+    trained = torch.load(Path(path) / "state_dict.pth", weights_only=True)
     assert all(torch.equal(p, trained[name]) for name, p in agent.actor_critic.state_dict().items())
     assert any(not torch.equal(f, p) for f, p in zip(fresh, agent.actor_critic.parameters(), strict=True))
+
+
+class Interrupted(Exception):
+    pass
+
+
+def _interrupt_at(iteration):
+    def on_iteration(train_iter, _objective):
+        if train_iter == iteration:
+            raise Interrupted
+        return False
+
+    return on_iteration
+
+
+def _history(run_id, key):
+    return [
+        (m.step, m.value) for m in sorted(mlflow.MlflowClient().get_metric_history(run_id, key), key=lambda m: m.step)
+    ]
+
+
+def test_interrupted_run_resumes_from_last_checkpoint(cfg, monkeypatch):
+    cfg, overrides = cfg
+    _use_curriculum(cfg, monkeypatch)
+    cfg.num_iters = 4
+    with pytest.raises(Interrupted):
+        train(cfg, overrides=overrides, on_iteration=_interrupt_at(3))
+    experiment_id = setup_mlflow(instantiate(cfg, _convert_="all"))
+    interrupted = find_resumable_run(experiment_id, config_hash(cfg), cfg.num_iters)
+    # Saved every 2 iterations, so the third one is repeated
+    assert interrupted is not None and interrupted.iteration == 2
+    _, state = load_training_state(interrupted.run_id)
+    assert state["loop"]["level_scheduler"]["num_unlocked"] == 2
+    assert state["loop"]["agent"]["self_imitation"]
+    assert state["loop"]["novelty_bonus"]["counts"]
+    interrupted_steps = _history(interrupted.run_id, "total_episodes")
+
+    result = train(cfg, overrides=overrides, resume_run_id=interrupted.run_id)
+
+    assert result.run_id == interrupted.run_id
+    steps = _history(result.run_id, "total_episodes")
+    # The repeated third iteration continues from the checkpoint's environment step
+    assert steps[2][0] == interrupted_steps[2][0]
+    # 4 iterations of 2 workers with 4 steps each
+    assert steps[-1][0] == 4 * 2 * 4
+    assert [value for _, value in _history(result.run_id, "iteration")][-1] == 3
+    run = mlflow.get_run(result.run_id)
+    assert run.data.tags[RESUME_ITER_TAG] == "4" and run.data.tags["resumed_after_iter"] == "2"
+    # Finished, so there is nothing left to resume
+    assert find_resumable_run(experiment_id, config_hash(cfg), cfg.num_iters) is None
+
+
+def test_only_runs_with_the_same_config_are_resumable(cfg):
+    cfg, overrides = cfg
+    with pytest.raises(Interrupted):
+        train(cfg, overrides=overrides, on_iteration=_interrupt_at(3))
+    experiment_id = setup_mlflow(instantiate(cfg, _convert_="all"))
+
+    cfg.tags = {"note": "tags and checkpoint frequency do not matter"}
+    cfg.save_frequency = 5
+    assert find_resumable_run(experiment_id, config_hash(cfg), cfg.num_iters) is not None
+    cfg.agent.gamma = 0.5
+    assert find_resumable_run(experiment_id, config_hash(cfg), cfg.num_iters) is None
+
+
+def test_stopped_runs_are_not_resumable(cfg):
+    cfg, overrides = cfg
+    train(cfg, overrides=overrides, on_iteration=lambda i, _: i == 2)
+    experiment_id = setup_mlflow(instantiate(cfg, _convert_="all"))
+    assert find_resumable_run(experiment_id, config_hash(cfg), cfg.num_iters) is None

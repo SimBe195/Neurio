@@ -49,6 +49,13 @@ class Agent(ABC):
     def load(self, run_id: str, load_iter: int) -> None:
         """Load a checkpoint of the given mlflow run."""
 
+    def state_dict(self) -> dict:
+        """Everything training changed, to resume it."""
+        return {}
+
+    def load_state_dict(self, state: dict) -> None:
+        pass
+
     def feed_observation(self, state: np.ndarray) -> None:
         pass
 

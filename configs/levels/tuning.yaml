@@ -1,0 +1,10 @@
+# For hyperparameter search: the regular curriculum over a few levels with different mechanics, in game order
+#   1-1  running, jumping, enemies
+#   1-3  treetop platforms over gaps, with a dead end that rewards jumping into a pit
+#   2-2  swimming
+#   4-1  Lakitu throwing spinies from above
+defaults:
+  - curriculum
+  - _self_
+
+levels: ["1-1", "1-3", "2-2", "4-1"]

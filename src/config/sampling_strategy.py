@@ -25,6 +25,13 @@ class SamplingStrategy(ABC):
     def get_metrics(self) -> dict[str, float]:
         return {}
 
+    def state_dict(self) -> dict:
+        """What update() changed, to resume training."""
+        return {}
+
+    def load_state_dict(self, state: dict) -> None:
+        pass
+
 
 def _greedy_probs(action_probs: torch.Tensor) -> torch.Tensor:
     greedy_actions = torch.argmax(action_probs, dim=-1)
@@ -88,3 +95,9 @@ class AdaptiveEpsilonGreedySamplingStrategy(SamplingStrategy):
 
     def get_metrics(self) -> dict[str, float]:
         return {"exploration_epsilon": self._epsilon}
+
+    def state_dict(self) -> dict:
+        return {"epsilon": self._epsilon, "prev_performance": self._prev_performance}
+
+    def load_state_dict(self, state: dict) -> None:
+        self._epsilon, self._prev_performance = state["epsilon"], state["prev_performance"]

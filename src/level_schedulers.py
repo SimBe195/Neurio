@@ -29,6 +29,13 @@ class LevelScheduler:
         """Competence over the scheduled levels, higher is better, None if not tracked."""
         return None
 
+    def state_dict(self) -> dict:
+        """The progress of training, to resume it."""
+        return {}
+
+    def load_state_dict(self, state: dict) -> None:
+        pass
+
 
 class CurriculumLevelScheduler(LevelScheduler):
     """Unlocks levels on mastery and samples them by need, see CurriculumLevelsConfig."""
@@ -43,6 +50,8 @@ class CurriculumLevelScheduler(LevelScheduler):
         self.results: dict[str, deque[bool]] = {level: deque(maxlen=config.success_window) for level in config.levels}
         # The distribution the workers currently use
         self._sent_distribution = config.initial_distribution()
+        self._score_sum = 0.0
+        self._num_updates = 0
 
     @property
     def unlocked_levels(self) -> list[str]:
@@ -82,6 +91,8 @@ class CurriculumLevelScheduler(LevelScheduler):
         if self.num_unlocked < len(self.config.levels) and self.is_mastered():
             self.num_unlocked += 1
             log.info(f"Unlocked level {self.newest_level}.")
+        self._score_sum += self.score()
+        self._num_updates += 1
 
         # The weights follow the success rates, so the distribution can change without an unlock
         levels, weights = self.distribution()
@@ -94,7 +105,11 @@ class CurriculumLevelScheduler(LevelScheduler):
         return changed
 
     def get_metrics(self) -> dict[str, float]:
-        metrics: dict[str, float] = {"num_unlocked_levels": self.num_unlocked, "levels_cleared_score": self.score()}
+        metrics: dict[str, float] = {
+            "num_unlocked_levels": self.num_unlocked,
+            "levels_cleared_score": self.score(),
+            "mean_levels_cleared_score": self.mean_score(),
+        }
         for level in self.unlocked_levels:
             if (rate := self.success_rate(level)) is not None:
                 metrics[f"success_rate_{level}"] = rate
@@ -103,6 +118,26 @@ class CurriculumLevelScheduler(LevelScheduler):
     def score(self) -> float:
         """Sum of the recent success rates over all levels, i.e. the expected number of levels cleared."""
         return sum(self.success_rate(level) or 0.0 for level in self.config.levels)
+
+    def mean_score(self) -> float:
+        """Mean score over all updates so far, which rewards learning fast and steadily."""
+        return self._score_sum / self._num_updates if self._num_updates else 0.0
+
+    def state_dict(self) -> dict:
+        return {
+            "num_unlocked": self.num_unlocked,
+            "results": {level: list(results) for level, results in self.results.items()},
+            "score_sum": self._score_sum,
+            "num_updates": self._num_updates,
+        }
+
+    def load_state_dict(self, state: dict) -> None:
+        self.num_unlocked = state["num_unlocked"]
+        for level, results in state["results"].items():
+            self.results[level].extend(results)
+        self._score_sum = state["score_sum"]
+        self._num_updates = state["num_updates"]
+        self._sent_distribution = self.distribution()
 
 
 def get_level_scheduler(config: LevelConfig) -> LevelScheduler:

@@ -33,3 +33,9 @@ class NoveltyBonus:
     @property
     def visited_cells(self) -> int:
         return len(self.counts)
+
+    def state_dict(self) -> dict:
+        return {"counts": dict(self.counts)}
+
+    def load_state_dict(self, state: dict) -> None:
+        self.counts.update(state["counts"])

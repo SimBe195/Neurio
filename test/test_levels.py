@@ -77,7 +77,12 @@ def test_curriculum_unlocks_after_mastery():
     scheduler.update()
     assert scheduler.num_unlocked == 2
     assert scheduler.distribution()[0] == ["1-1", "1-2"]
-    assert scheduler.get_metrics() == {"num_unlocked_levels": 2, "success_rate_1-1": 0.5, "levels_cleared_score": 0.5}
+    assert scheduler.get_metrics() == {
+        "num_unlocked_levels": 2,
+        "success_rate_1-1": 0.5,
+        "levels_cleared_score": 0.5,
+        "mean_levels_cleared_score": pytest.approx((2 / 3 + 0.5) / 2),
+    }
 
 
 def test_curriculum_requires_mastery_of_all_unlocked_levels():
@@ -142,6 +147,16 @@ def test_curriculum_stops_at_last_level():
     assert scheduler.num_unlocked == 3
 
 
+def test_mean_score_over_updates():
+    scheduler = _curriculum(initial_levels=2)
+    assert scheduler.mean_score() == 0.0
+    _record(scheduler, "1-1", [True])
+    scheduler.update()
+    _record(scheduler, "1-2", [True])
+    scheduler.update()
+    assert scheduler.mean_score() == pytest.approx((1 + 2) / 2)
+
+
 def test_curriculum_score_and_unknown_levels():
     scheduler = _curriculum(initial_levels=2)
     scheduler.record_episode("8-4", True)
@@ -150,3 +165,15 @@ def test_curriculum_score_and_unknown_levels():
     _record(scheduler, "1-2", [True])
     assert scheduler.score() == pytest.approx(1.5)
     assert LevelScheduler(SingleLevelConfig()).score() is None
+
+
+def test_curriculum_state_is_restored():
+    scheduler = _curriculum(unlock_success_rate=0.5)
+    _record(scheduler, "1-1", [True] * 4)
+    scheduler.update()
+    restored = _curriculum(unlock_success_rate=0.5)
+    restored.load_state_dict(scheduler.state_dict())
+    assert restored.num_unlocked == 2
+    assert restored.success_rate("1-1") == 1.0
+    assert restored.mean_score() == scheduler.mean_score()
+    assert restored.distribution() == scheduler.distribution()

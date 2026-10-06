@@ -14,15 +14,18 @@ render: False
 tracking_uri: sqlite:///mlflow.db
 # The training objective, e.g. for hyperparameter search, is the mean reward of this many most recent episodes
 objective_window: 100
-# The objective, e.g. for hyperparameter search: recent_mean_reward, or levels_cleared_score for curricula
+# The objective, e.g. for hyperparameter search: recent_mean_reward, or for curricula levels_cleared_score or
+# mean_levels_cleared_score (its mean over the run)
 objective: recent_mean_reward
 # Curiosity driven exploration, see config.exploration.ExplorationConfig. A bonus_scale of 0 disables it.
 exploration:
   _target_: config.exploration.ExplorationConfig
-  bonus_scale: 0.5
+  bonus_scale: 0.7
   cell_size: 16
 # mlflow tags of the run, add some with +tags.<name>=<value>
 tags: {}
+# Continue an interrupted run with the same config from its last checkpoint: true, false (start a new run) or null (ask)
+resume: null
 # Evaluation with test.py: run to load (default: the best of the experiment) and checkpoint (default: the latest)
 test_run_id: null
 test_iter: null

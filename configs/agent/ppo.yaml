@@ -1,5 +1,5 @@
 defaults:
-  - model: actor_critic
+  - model: impala
   # Constant, since training on later levels is open ended with the level curriculum
   - learning_rate: constant
   - sampling_strategy: dist_sample
@@ -7,7 +7,7 @@ defaults:
 
 _target_: config.agent.PPOAgentConfig
 
-gamma: 0.99
+gamma: 0.95
 tau: 0.95
 # Set to steps_per_iter in the main config, so that every update trains only on data of the current policy
 exp_buffer_size: 128
@@ -17,14 +17,14 @@ batch_size: 512
 clip_param: 0.2
 clip_value: False
 critic_loss_weight: 0.5
-initial_entropy_loss_weight: 0.01
+initial_entropy_loss_weight: 0.013
 final_entropy_loss_weight: 0.001
 grad_clip_norm: 0.5
 normalize_advantages: True
 adam_eps: 1.0e-05
 # Self-imitation learning of the agent's own best episodes, see config.agent.PPOAgentConfig. 0 disables it.
-sil_loss_weight: 1.0
+sil_loss_weight: 0.7
 sil_value_loss_weight: 0.01
-sil_episodes_per_level: 16
+sil_episodes_per_level: 5
 sil_updates: 8
 sil_batch_size: 256

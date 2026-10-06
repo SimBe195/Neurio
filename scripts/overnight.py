@@ -1,18 +1,14 @@
 """
-Overnight experiments, sized for about 5 hours on 32 cores and one GPU.
+Batch of experiments: the network architecture on 2-2, the swimming level, which took 10 times longer to learn than
+the other levels in a calibration curriculum run. Each variant learns 2-2 alone, so the comparison shows how fast the
+network learns to swim without other levels competing for practice:
+  nature        the DQN encoder, 3 conv layers with 32/64/64 filters and a 512-unit layer
+  nature-wide   the same with 64/128/128 filters
+  impala        the IMPALA residual encoder (default) with 32/64/64 channels and a 256-unit layer
 
-Self-imitation on other difficult levels: on 1-3, imitating the agent's own best episodes made every run learn the route
-around a dead end. This checks whether it also helps on two levels of different kinds:
-  4-4  maze castle, where the wrong path loops back
-  5-3  treetops with moving platforms
-
-Variants, both with a lifelong novelty bonus of 0.5 and the defaults otherwise, 5 repeats of 300 iterations
-(1.2M environment steps) on each level:
-  base       no self-imitation
-  sil-best   self-imitation of the 16 best episodes per level, loss weight 1.0
-
-Runs are compared by the share of episodes reaching the flag in the last iterations, how many runs reached it at all
-and how far they got. Two runs are trained in parallel, which completes about 1.3 times as many runs as one at a time.
+All with the default settings otherwise, 2 repeats of 500 iterations (2M environment steps) each. Runs are
+compared by the share of episodes reaching the flag in the last iterations, how many runs reached it at all and how
+far they got. Two runs are trained in parallel, which completes about 1.3 times as many runs as one at a time.
 
 Each run is a separate `train.py` process, logged to mlflow with the tags `experiment`, `variant`, `level` and
 `repeat`. Runs that would not finish before the deadline are skipped.
@@ -40,12 +36,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-LEVELS = ["4-4", "5-3"]
-ITERS = 300
-REPEATS = 5
+LEVELS = ["2-2"]
+ITERS = 500
+REPEATS = 2
 PARALLEL = 2
-# Measured with two runs in parallel, including the start of a run
-SECONDS_PER_RUN = ITERS * 5.2 + 25
+# Measured with two runs in parallel for the slowest variant, including the start of a run
+SECONDS_PER_RUN = ITERS * 6.5 + 25
 # Number of final iterations whose episodes are averaged for the final values
 FINAL_ITERS = 50
 # Positions beyond this are rare reading errors of the game's memory
@@ -55,13 +51,13 @@ COMMON = [
     "levels=single",
     f"num_iters={ITERS}",
     "save_frequency=1000",
-    "exploration.bonus_scale=0.5",
 ]
 VARIANTS = [
-    ("base", ["agent.sil_loss_weight=0.0"]),
-    ("sil-best", ["agent.sil_loss_weight=1.0"]),
+    ("nature", ["agent/model=nature"]),
+    ("nature-wide", ["agent/model=nature", "agent.model.num_filters=[64,128,128]"]),
+    ("impala", []),
 ]
-BASELINE_VARIANT = "base"
+BASELINE_VARIANT = "nature"
 
 
 @dataclass
@@ -104,6 +100,8 @@ def run_training(run: Run, args: argparse.Namespace, log_dir: Path) -> tuple[int
         + args.overrides
         + [
             f"tracking_uri={args.tracking_uri}",
+            # Repeats share their config, each one is a new run
+            "resume=false",
             f"+tags.experiment={args.experiment}",
             f"+tags.variant={run.variant}",
             f"+tags.level={run.level}",
@@ -232,7 +230,7 @@ def report(args: argparse.Namespace) -> None:
     for level in LEVELS:
         print(f"\n{level}")
         print(
-            f"  {'variant':10s} {'runs':>4s} {'final flags':>14s} {'runs with flag':>15s} {'p':>5s} "
+            f"  {'variant':12s} {'runs':>4s} {'final flags':>14s} {'runs with flag':>15s} {'p':>5s} "
             f"{'first flag':>11s} {'final x':>16s} {'best x':>16s} {'max x':>6s}"
         )
         base = results.get((level, BASELINE_VARIANT), [])
@@ -250,7 +248,7 @@ def report(args: argparse.Namespace) -> None:
             first_flags = [r["first_flag"] for r in values if not math.isinf(r["first_flag"])]
             first = f"{min(first_flags)}" if first_flags else "-"
             print(
-                f"  {name:10s} {len(values):4d} {summary(values, 'final_flag_rate', 100, '%'):>14s} "
+                f"  {name:12s} {len(values):4d} {summary(values, 'final_flag_rate', 100, '%'):>14s} "
                 f"{flagged:>9d} / {len(values):<3d} {p:5.2f} {first:>11s} {summary(values, 'final_x'):>16s} "
                 f"{summary(values, 'best_x'):>16s} {max(r['max_x'] for r in values):6.0f}"
             )

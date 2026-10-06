@@ -1,5 +1,6 @@
 import logging
 import math
+import tempfile
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 
@@ -14,8 +15,16 @@ from agents import Agent, get_agent
 from config import NeurioConfig, flatten
 from environment import get_env_info, get_multiprocess_environment
 from game_loop import GameLoop
-from level_schedulers import get_level_scheduler
+from level_schedulers import CurriculumLevelScheduler, get_level_scheduler
 from novelty import NoveltyBonus
+from resume import (
+    CONFIG_HASH_TAG,
+    config_hash,
+    decide_resume,
+    find_resumable_run,
+    load_training_state,
+    save_training_state,
+)
 
 logging.basicConfig(level=logging.INFO)
 
@@ -50,7 +59,8 @@ class Checkpoints:
         self.best_score: float | None = None
         self.best_iter = -min_iters
 
-    def after_iteration(self, train_iter: int, score: float | None, last: bool) -> None:
+    def after_iteration(self, train_iter: int, score: float | None, last: bool) -> bool:
+        """:return: Whether a checkpoint was saved"""
         improved = (
             score is not None
             and (self.best_score is None or score >= self.best_score + self.min_improvement)
@@ -61,6 +71,14 @@ class Checkpoints:
             mlflow.set_tags({"best_checkpoint_iter": str(train_iter), "best_score": f"{score:.3f}"})
         if improved or last or train_iter % self.save_frequency == 0:
             self.agent.save(train_iter)
+            return True
+        return False
+
+    def state_dict(self) -> dict:
+        return {"best_score": self.best_score, "best_iter": self.best_iter}
+
+    def load_state_dict(self, state: dict) -> None:
+        self.best_score, self.best_iter = state["best_score"], state["best_iter"]
 
 
 def get_experiment_name(config: NeurioConfig) -> str:
@@ -69,8 +87,9 @@ def get_experiment_name(config: NeurioConfig) -> str:
 
 def load_run_config(run_id: str) -> DictConfig:
     """Load the config a run was trained with."""
-    path = mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path=CONFIG_ARTIFACT)
-    cfg = OmegaConf.load(path)
+    with tempfile.TemporaryDirectory() as directory:
+        path = mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path=CONFIG_ARTIFACT, dst_path=directory)
+        cfg = OmegaConf.load(path)
     assert isinstance(cfg, DictConfig)
     return cfg
 
@@ -86,12 +105,11 @@ def setup_mlflow(config: NeurioConfig) -> str:
 
 def current_objective(config: NeurioConfig, loop: GameLoop) -> float | None:
     """The configured objective, None while it is not available yet."""
-    if config.objective == "levels_cleared_score":
-        assert loop.level_scheduler is not None
-        score = loop.level_scheduler.score()
-        assert score is not None, "levels_cleared_score needs a level curriculum"
-        return score
-    return loop.recent_mean_reward
+    if config.objective == "recent_mean_reward":
+        return loop.recent_mean_reward
+    scheduler = loop.level_scheduler
+    assert isinstance(scheduler, CurriculumLevelScheduler), f"{config.objective} needs a level curriculum"
+    return scheduler.score() if config.objective == "levels_cleared_score" else scheduler.mean_score()
 
 
 def train(
@@ -99,26 +117,36 @@ def train(
     overrides: list[str] | None = None,
     on_iteration: IterationCallback | None = None,
     tags: dict[str, str] | None = None,
+    resume_run_id: str | None = None,
 ) -> TrainResult:
     """
-    Train an agent in a new mlflow run.
+    Train an agent in a new mlflow run, or continue an interrupted one.
 
     :param cfg: Composed config, which is stored with the run so that the run can be reproduced and evaluated
     :param overrides: Overrides the config was composed with, stored as a tag for reference
     :param on_iteration: Optional callback after each iteration, see IterationCallback
     :param tags: Additional mlflow tags of the run
+    :param resume_run_id: Run to continue from its last checkpoint, which must have been trained with the same config
     :return: Final objective (see NeurioConfig.objective) and the run id
     """
     config: NeurioConfig = instantiate(cfg, _convert_="all")
     experiment_id = setup_mlflow(config)
 
-    with mlflow.start_run(experiment_id=experiment_id) as run:
-        # The full config as artifact is the source of truth, the flattened params allow filtering in the UI
-        container = OmegaConf.to_container(cfg, resolve=True)
-        assert isinstance(container, dict)
-        mlflow.log_dict({str(key): value for key, value in container.items()}, CONFIG_ARTIFACT)
-        mlflow.log_params(flatten(asdict(config)))
-        mlflow.set_tags({"overrides": " ".join(overrides or []), **config.tags, **(tags or {})})
+    with mlflow.start_run(run_id=resume_run_id, experiment_id=None if resume_run_id else experiment_id) as run:
+        if resume_run_id is None:
+            # The full config as artifact is the source of truth, the flattened params allow filtering in the UI
+            container = OmegaConf.to_container(cfg, resolve=True)
+            assert isinstance(container, dict)
+            mlflow.log_dict({str(key): value for key, value in container.items()}, CONFIG_ARTIFACT)
+            mlflow.log_params(flatten(asdict(config)))
+            mlflow.set_tags(
+                {
+                    "overrides": " ".join(overrides or []),
+                    CONFIG_HASH_TAG: config_hash(cfg),
+                    **config.tags,
+                    **(tags or {}),
+                }
+            )
 
         render_mode = "human" if config.render else None
         env = get_multiprocess_environment(config.num_workers, config.environment, config.levels, render_mode)
@@ -129,15 +157,26 @@ def train(
             novelty_bonus = NoveltyBonus(config.exploration) if config.exploration.bonus_scale > 0 else None
             loop = GameLoop(env, agent, get_level_scheduler(config.levels), config.objective_window, novelty_bonus)
             checkpoints = Checkpoints(agent, config.save_frequency)
+            first_iter = 1
+            if resume_run_id is not None:
+                last_iter, state = load_training_state(resume_run_id)
+                loop.load_state_dict(state["loop"])
+                checkpoints.load_state_dict(state["checkpoints"])
+                first_iter = last_iter + 1
+                mlflow.set_tag("resumed_after_iter", str(last_iter))
 
-            log.info(f"Train on levels {config.levels.name} for {config.num_iters} iters.")
+            log.info(f"Train on levels {config.levels.name} from iter {first_iter} to {config.num_iters}.")
             stopped_early = False
-            for train_iter in tqdm(range(1, config.num_iters + 1)):
+            iters = range(first_iter, config.num_iters + 1)
+            for train_iter in tqdm(iters, initial=first_iter - 1, total=config.num_iters):
                 loop.run_train_iter(config.steps_per_iter)
                 stopped_early = on_iteration is not None and on_iteration(train_iter, current_objective(config, loop))
                 last = stopped_early or train_iter == config.num_iters
                 score = loop.level_scheduler.score() if loop.level_scheduler is not None else None
-                checkpoints.after_iteration(train_iter, score, last)
+                if checkpoints.after_iteration(train_iter, score, last):
+                    save_training_state(
+                        train_iter, {"loop": loop.state_dict(), "checkpoints": checkpoints.state_dict()}
+                    )
                 if stopped_early:
                     log.info(f"Stopped early after iter {train_iter}.")
                     mlflow.set_tag("stopped_early", "true")
@@ -151,7 +190,10 @@ def train(
 
 @hydra.main(version_base="1.3", config_path="../configs", config_name="neurio_config")
 def main(cfg: DictConfig) -> float:
-    return train(cfg, overrides=list(HydraConfig.get().overrides.task)).objective
+    config: NeurioConfig = instantiate(cfg, _convert_="all")
+    interrupted = find_resumable_run(setup_mlflow(config), config_hash(cfg), config.num_iters)
+    resume_run_id = decide_resume(interrupted, config.resume)
+    return train(cfg, overrides=list(HydraConfig.get().overrides.task), resume_run_id=resume_run_id).objective
 
 
 if __name__ == "__main__":
