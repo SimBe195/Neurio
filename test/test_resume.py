@@ -54,8 +54,8 @@ def test_restored_state_survives_safe_loading(tmp_path, monkeypatch):
     restored = _make_agent(monkeypatch, sil_loss_weight=1.0)
     restored.load_state_dict(torch.load(tmp_path / "state.pt", weights_only=True))
     assert restored.update_step == 7
-    (episode,) = restored.self_imitation.episodes["1-3"]
+    (episode,) = restored.self_imitation.episodes["1-3 small"]
     assert episode.total_reward == 3.0
-    assert torch.equal(episode.frames, agent.self_imitation.episodes["1-3"][0].frames)
+    assert torch.equal(episode.frames, agent.self_imitation.episodes["1-3 small"][0].frames)
     for name, value in agent.actor_critic.state_dict().items():
         assert torch.equal(value, restored.actor_critic.state_dict()[name])

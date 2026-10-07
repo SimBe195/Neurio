@@ -52,6 +52,7 @@ class FakeMarioEnv(gymnasium.Env):
         self.t = 0
         self.num_resets = 0
         self.actions: list[int] = []
+        self.powerups: list[int] = []
 
     def _observation(self) -> np.ndarray:
         columns = np.arange(BASE_WIDTH, dtype=np.uint8)
@@ -70,6 +71,10 @@ class FakeMarioEnv(gymnasium.Env):
 
     def render(self):
         return self._observation()
+
+    def set_powerup(self, powerup):
+        self.powerups.append(int(powerup))
+        return self._observation(), self._info()
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)

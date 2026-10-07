@@ -52,7 +52,6 @@ class PPOAgent(Agent):
         self.clip_param = self.config.clip_param
 
         self.epochs_per_update = self.config.epochs_per_update
-        self.total_updates = self.config.total_updates
 
         self.cpu = torch.device("cpu")
         if torch.cuda.is_available():
@@ -149,7 +148,7 @@ class PPOAgent(Agent):
         rewards = torch.tensor(outcome.rewards, dtype=torch.float32, device=self.device)
         if self.self_imitation is not None:
             # The game's reward only: the agent should imitate what was good, not what was new
-            self.self_imitation.record_rewards(rewards, outcome.dones.tolist(), outcome.levels)
+            self.self_imitation.record_rewards(rewards, outcome.dones.tolist(), outcome.levels, outcome.start_powerups)
         if outcome.bonus is not None:
             rewards += torch.tensor(outcome.bonus, dtype=torch.float32, device=self.device)
 
@@ -281,8 +280,8 @@ class PPOAgent(Agent):
         self.opt.step()
 
     def _current_entropy_loss_weight(self) -> float:
-        # Linear decay from the initial to the final weight over the course of training
-        progress = min(self.update_step / self.total_updates, 1.0)
+        # Linear decay from the initial to the final weight
+        progress = min(self.update_step / self.config.entropy_decay_updates, 1.0)
         return self.initial_entropy_loss_weight + progress * (
             self.final_entropy_loss_weight - self.initial_entropy_loss_weight
         )

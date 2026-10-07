@@ -1,6 +1,7 @@
 import logging
 import time
 from dataclasses import dataclass
+from enum import IntEnum
 from typing import Any, Literal, SupportsFloat
 
 import cv2
@@ -10,6 +11,7 @@ import gymnasium.logger
 import numpy as np
 import numpy.typing as npt
 from gym_super_mario_bros.actions import COMPLEX_MOVEMENT, SIMPLE_MOVEMENT
+from gym_super_mario_bros.smb_env import SuperMarioBrosEnv
 from gymnasium.core import Env, ObservationWrapper, RenderFrame, Wrapper
 from gymnasium.spaces import Box, Discrete, MultiDiscrete
 from gymnasium.vector import AsyncVectorEnv, AutoresetMode, VectorEnv
@@ -17,7 +19,7 @@ from gymnasium.wrappers import FrameStackObservation, GrayscaleObservation, Reco
 from nes_py.wrappers import JoypadSpace
 
 from config.environment import EnvironmentConfig
-from config.levels import LevelConfig, ProgressionLevelsConfig
+from config.levels import ALL_LEVELS, LevelConfig, ProgressionLevelsConfig
 
 # gymnasium annotates the level with its default value, so type checkers reject any other
 gymnasium.logger.min_level = logging.ERROR  # ty: ignore[invalid-assignment]
@@ -32,12 +34,23 @@ RenderMode = Literal["human", "rgb_array"]
 StepType = tuple[Any, SupportsFloat, bool, bool, dict[str, Any]]
 
 
+class Powerup(IntEnum):
+    """Mario's power-up state, as stored in the game's memory."""
+
+    SMALL = 0
+    BIG = 1
+    FIRE = 2
+
+
 class BaseEnvironment(JoypadSpace):
     """
     This class represents the basic game environment, initialized with a certain configuration.
     It inherits from JoypadSpace, which is a class that allows us to translate our own custom actions into sequences
     of button presses that the NES emulator will understand.
     """
+
+    # Fire Mario's sprite colors, from the game's table of player colors
+    FIRE_COLORS = (0x37, 0x27, 0x16)
 
     def __init__(
         self,
@@ -62,6 +75,31 @@ class BaseEnvironment(JoypadSpace):
             COMPLEX_MOVEMENT if config.complex_movement else SIMPLE_MOVEMENT,
         )
 
+    def set_powerup(self, powerup: Powerup) -> tuple[npt.NDArray, dict]:
+        """
+        Give Mario a power-up at the start of an episode, as if he carried it over from the previous level.
+
+        :return: Observation and info of the next frame, which shows Mario with the power-up
+        """
+        game = self.unwrapped
+        assert isinstance(game, SuperMarioBrosEnv)
+        game.ram[0x0756] = powerup
+        # Mario's size: 0 big, 1 small
+        game.ram[0x0754] = int(powerup == Powerup.SMALL)
+        if powerup == Powerup.FIRE:
+            # The game sets fire Mario's colors when he collects the flower. Queue them in its buffer of video memory
+            # updates: the palette address of Mario's sprite colors, their number, the colors and a terminator.
+            offset = int(game.ram[0x0300])
+            update = [0x3F, 0x11, len(self.FIRE_COLORS), *self.FIRE_COLORS, 0x00]
+            game.ram[0x0301 + offset : 0x0301 + offset + len(update)] = update
+            game.ram[0x0300] = offset + len(update) - 1
+        # The game's reward for power-ups compares with the last state, which would reward this one
+        game._status_last = game._powerup_level
+        # The second frame shows Mario with the power-up
+        for _ in range(2):
+            observation, _, _, _, info = self.step(0)
+        return observation, info
+
 
 class LevelSelectEnv(gymnasium.Env):
     """
@@ -83,6 +121,7 @@ class LevelSelectEnv(gymnasium.Env):
         self._envs: dict[str, BaseEnvironment] = {}
         self.set_level_distribution(levels, weights)
         self.current_level = levels[0]
+        self.start_powerup = Powerup.SMALL
         first_env = self._get_env(self.current_level)
         self.observation_space = first_env.observation_space
         self.action_space = first_env.action_space
@@ -101,11 +140,24 @@ class LevelSelectEnv(gymnasium.Env):
     def reset(self, *, seed: int | None = None, options: dict | None = None) -> tuple[npt.NDArray, dict]:
         super().reset(seed=seed)
         self.current_level = self.levels[self.np_random.choice(len(self.levels), p=self.weights)]
-        observation, info = self._get_env(self.current_level).reset(seed=seed)
-        return observation, info
+        env = self._get_env(self.current_level)
+        observation, info = env.reset(seed=seed)
+        # The game starts small, later levels may start with a power-up from the previous level
+        self.start_powerup = Powerup.SMALL
+        if self.current_level != ALL_LEVELS[0]:
+            self.start_powerup = Powerup(self.np_random.choice(len(Powerup), p=self.config.start_powerup_probs))
+            if self.start_powerup != Powerup.SMALL:
+                observation, info = env.set_powerup(self.start_powerup)
+        # A random action for up to one less frame than an action is repeated shifts the timing of the episode against
+        # the repeated actions and the enemies, so that the agent cannot rely on one exact course of the level
+        assert isinstance(env.action_space, Discrete)
+        for _ in range(self.np_random.integers(self.config.num_repeat_frames)):
+            observation, _, _, _, info = env.step(int(self.np_random.integers(env.action_space.n)))
+        return observation, {**info, "start_powerup": int(self.start_powerup)}
 
     def step(self, action: int) -> StepType:
-        return self._get_env(self.current_level).step(action)
+        observation, reward, terminated, truncated, info = self._get_env(self.current_level).step(action)
+        return observation, reward, terminated, truncated, {**info, "start_powerup": int(self.start_powerup)}
 
     def render(self) -> RenderFrame | list[RenderFrame] | None:
         return self._get_env(self.current_level).render()

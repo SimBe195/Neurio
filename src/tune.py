@@ -26,15 +26,17 @@ CONFIG_DIR = str(Path(__file__).resolve().parents[1] / "configs")
 
 
 def suggest_ppo(trial: optuna.Trial) -> list[str]:
-    """PPO hyperparameters, as Hydra overrides."""
+    """
+    How PPO learns from its experience, as Hydra overrides. Gamma, entropy and exploration are left at their defaults,
+    which the exploration search space tuned.
+    """
     return [
         f"agent.learning_rate.learning_rate={trial.suggest_float('learning_rate', 1e-4, 1e-3, log=True)}",
-        f"agent.gamma={trial.suggest_float('gamma', 0.9, 0.995)}",
-        f"agent.tau={trial.suggest_float('tau', 0.8, 1.0)}",
-        f"agent.critic_loss_weight={trial.suggest_float('critic_loss_weight', 0.1, 1.0, log=True)}",
-        f"agent.initial_entropy_loss_weight={trial.suggest_float('initial_entropy_loss_weight', 1e-3, 3e-2, log=True)}",
-        f"agent.batch_size={trial.suggest_categorical('batch_size', [256, 512, 1024])}",
         f"agent.epochs_per_update={trial.suggest_int('epochs_per_update', 3, 10)}",
+        f"agent.batch_size={trial.suggest_categorical('batch_size', [256, 512, 1024])}",
+        f"agent.tau={trial.suggest_float('tau', 0.8, 0.99)}",
+        f"agent.clip_param={trial.suggest_float('clip_param', 0.1, 0.3)}",
+        f"agent.critic_loss_weight={trial.suggest_float('critic_loss_weight', 0.25, 1.0, log=True)}",
     ]
 
 

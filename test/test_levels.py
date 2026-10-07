@@ -86,7 +86,7 @@ def test_curriculum_unlocks_after_mastery():
 
 
 def test_curriculum_requires_mastery_of_all_unlocked_levels():
-    scheduler = _curriculum(initial_levels=2, unlock_success_rate=0.6)
+    scheduler = _curriculum(initial_levels=2, unlock_mean_success_rate=0.6)
     _record(scheduler, "1-2", [True] * 4)
 
     # The newest level is mastered, but the earlier one has too few recent episodes
@@ -105,8 +105,22 @@ def test_curriculum_requires_mastery_of_all_unlocked_levels():
     assert scheduler.num_unlocked == 3
 
 
+def test_hard_level_does_not_block_progress():
+    scheduler = _curriculum(levels=["1-1", "1-2", "1-3", "1-4"], initial_levels=3, unlock_mean_success_rate=0.7)
+    _record(scheduler, "1-1", [True] * 4)
+    _record(scheduler, "1-2", [True, False, False, False])
+    # The newest level is mastered, the mean (1 + 0.25 + 0.5) / 3 is too low
+    _record(scheduler, "1-3", [True, True, False, False])
+    scheduler.update()
+    assert scheduler.num_unlocked == 3
+    # With the newest level better, the hard level no longer blocks: (1 + 0.25 + 1) / 3
+    _record(scheduler, "1-3", [True] * 4)
+    scheduler.update()
+    assert scheduler.num_unlocked == 4
+
+
 def test_forgotten_level_blocks_progress():
-    scheduler = _curriculum(initial_levels=2, unlock_success_rate=0.75)
+    scheduler = _curriculum(initial_levels=2, unlock_success_rate=0.75, unlock_mean_success_rate=0.75)
     _record(scheduler, "1-2", [True] * 4)
     _record(scheduler, "1-1", [False] * 4)
     for _ in range(10):

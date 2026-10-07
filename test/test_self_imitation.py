@@ -3,6 +3,7 @@ import pytest
 import torch
 
 from agents.self_imitation import SelfImitationMemory
+from environment import Powerup
 from test_ppo_agent import ENV_INFO, _make_agent, _outcome, _random_states
 
 STATE_SHAPE = (ENV_INFO.total_channel_dim, ENV_INFO.height, ENV_INFO.width)
@@ -25,7 +26,7 @@ def test_episode_returns_and_storage():
     # Worker 0 finishes an episode of 3 steps, worker 1 is still playing
     _play(memory, [[1.0, 5.0], [2.0, 5.0], [4.0, 5.0]], [[False, False], [False, False], [True, False]], ["1-3", "1-3"])
 
-    (episode,) = memory.episodes["1-3"]
+    (episode,) = memory.episodes["1-3 small"]
     assert episode.total_reward == 7.0
     assert episode.returns.tolist() == pytest.approx([1 + 0.5 * 2 + 0.25 * 4, 2 + 0.5 * 4, 4.0])
     # Frames of the first state and the newest frame of each following state
@@ -37,9 +38,21 @@ def test_keeps_best_episodes_per_level():
     memory = SelfImitationMemory(num_workers=1, gamma=0.9, episodes_per_level=2, stack_frames=STACK)
     for total, level in [(1.0, "1-3"), (3.0, "1-3"), (2.0, "1-3"), (0.5, "1-3"), (0.1, "4-4")]:
         _play(memory, [[total]], [[True]], [level])
-    assert sorted(e.total_reward for e in memory.episodes["1-3"]) == [2.0, 3.0]
+    assert sorted(e.total_reward for e in memory.episodes["1-3 small"]) == [2.0, 3.0]
     # Another level has its own store, even with a much lower reward
-    assert [e.total_reward for e in memory.episodes["4-4"]] == [pytest.approx(0.1)]
+    assert [e.total_reward for e in memory.episodes["4-4 small"]] == [pytest.approx(0.1)]
+
+
+def test_keeps_best_episodes_per_start_powerup():
+    memory = SelfImitationMemory(num_workers=1, gamma=0.9, episodes_per_level=1, stack_frames=STACK)
+    for total, powerup in [(1.0, Powerup.SMALL), (5.0, Powerup.FIRE), (2.0, Powerup.SMALL)]:
+        memory.record_actions(
+            torch.zeros(1, *STATE_SHAPE), torch.zeros(1, dtype=torch.int64), torch.ones(1, dtype=torch.int64)
+        )
+        memory.record_rewards(torch.tensor([total]), [True], ["1-2"], [powerup])
+    # Fire Mario does better, but does not replace the episodes of small Mario
+    assert [e.total_reward for e in memory.episodes["1-2 small"]] == [2.0]
+    assert [e.total_reward for e in memory.episodes["1-2 fire"]] == [5.0]
 
 
 def test_sampling():
@@ -95,7 +108,7 @@ def test_agent_records_its_episodes(sil_agent):
         sil_agent.give_reward(
             _outcome([1.0, 2.0], [t == 2, False], [False, False], bonus=[9.0, 9.0], levels=["1-3"] * 2)
         )
-    (episode,) = sil_agent.self_imitation.episodes["1-3"]
+    (episode,) = sil_agent.self_imitation.episodes["1-3 small"]
     # The game's reward only, without the bonus
     assert episode.total_reward == 3.0
     assert len(episode.actions) == 3

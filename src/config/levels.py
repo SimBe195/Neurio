@@ -83,8 +83,9 @@ class CurriculumLevelsConfig(LevelConfig):
     """
     Starts with the first `initial_levels` levels and adds the next level to the pool once the agent masters the
     pool: the flag was reached in at least `unlock_success_rate` of the last `success_window` episodes on the newest
-    level, and on average over all unlocked levels, each of which needs at least `min_level_episodes` recent episodes.
-    Levels the agent forgot therefore block progress.
+    level, and in at least `unlock_mean_success_rate` on average over all unlocked levels, each of which needs at least
+    `min_level_episodes` recent episodes. Levels the agent forgot therefore block progress, while a single hard level
+    does not, as long as the others are mastered.
 
     Levels are sampled by need: the weight of a level is its failure rate, at least `min_level_weight`, and 1 for
     levels without results yet. So the agent mostly practices what it cannot do yet, including forgotten levels.
@@ -93,6 +94,7 @@ class CurriculumLevelsConfig(LevelConfig):
     levels: list[str] = field(default_factory=lambda: list(ALL_LEVELS))
     initial_levels: int = 1
     unlock_success_rate: float = 0.5
+    unlock_mean_success_rate: float = 0.5
     success_window: int = 50
     min_level_episodes: int = 10
     min_level_weight: float = 0.1
@@ -101,6 +103,7 @@ class CurriculumLevelsConfig(LevelConfig):
         _check_levels(self.levels)
         assert 1 <= self.initial_levels <= len(self.levels)
         assert 0 < self.unlock_success_rate <= 1
+        assert 0 < self.unlock_mean_success_rate <= 1
         assert self.success_window >= 1
         assert 1 <= self.min_level_episodes <= self.success_window
         assert 0 < self.min_level_weight <= 1

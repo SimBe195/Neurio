@@ -47,6 +47,8 @@ def cfg(tmp_path, monkeypatch):
         "steps_per_iter=4",
         "save_frequency=2",
         "agent.batch_size=4",
+        # The fake episodes are only a few frames long, too short for random start frames
+        "environment.num_repeat_frames=1",
         # A tiny model keeps the checkpoints small
         "agent.model.channels=[4,4]",
         "agent.model.blocks_per_stage=1",
@@ -200,6 +202,7 @@ def test_evaluation_config(cfg):
     assert isinstance(config.levels, ProgressionLevelsConfig)
     assert isinstance(config.agent.sampling_strategy, GreedySamplingStrategy)
     assert config.num_workers == 1
+    assert config.environment.start_powerup_probs == [1.0, 0.0, 0.0]
     # Otherwise the run's own settings
     assert config.agent.batch_size == 4
 

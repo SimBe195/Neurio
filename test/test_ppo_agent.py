@@ -40,12 +40,12 @@ def _make_agent(monkeypatch, **overrides) -> PPOAgent:
         tau=0.8,
         exp_buffer_size=8,
         epochs_per_update=2,
-        total_updates=10,
         batch_size=4,
         clip_param=0.2,
         clip_value=True,
         critic_loss_weight=0.5,
         initial_entropy_loss_weight=0.01,
+        entropy_decay_updates=10,
         final_entropy_loss_weight=0.001,
         grad_clip_norm=0.5,
         **overrides,
@@ -191,14 +191,15 @@ def test_log_probs_come_from_behavior_policy(agent, strategy, expected_log_prob)
 
 def test_entropy_weight_schedule(agent):
     weights = []
-    for step in range(agent.total_updates + 3):
+    decay_updates = agent.config.entropy_decay_updates
+    for step in range(decay_updates + 3):
         agent.update_step = step
         weights.append(agent._current_entropy_loss_weight())
 
     assert weights[0] == pytest.approx(0.01)
-    assert weights[agent.total_updates // 2] == pytest.approx(0.0055)
-    assert weights[agent.total_updates] == pytest.approx(0.001)
-    # Stays at the final weight when training runs longer than planned
+    assert weights[decay_updates // 2] == pytest.approx(0.0055)
+    assert weights[decay_updates] == pytest.approx(0.001)
+    # Then stays at the final weight
     assert weights[-1] == pytest.approx(0.001)
     assert all(a >= b for a, b in itertools.pairwise(weights))
 

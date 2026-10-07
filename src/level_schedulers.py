@@ -84,8 +84,10 @@ class CurriculumLevelScheduler(LevelScheduler):
         if any(len(self.results[level]) < self.config.min_level_episodes for level in self.unlocked_levels):
             return False
         rates = [self.success_rate(level) or 0.0 for level in self.unlocked_levels]
-        threshold = self.config.unlock_success_rate
-        return rates[-1] >= threshold and sum(rates) / len(rates) >= threshold
+        return (
+            rates[-1] >= self.config.unlock_success_rate
+            and sum(rates) / len(rates) >= self.config.unlock_mean_success_rate
+        )
 
     def update(self) -> bool:
         if self.num_unlocked < len(self.config.levels) and self.is_mastered():

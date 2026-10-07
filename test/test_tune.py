@@ -8,15 +8,14 @@ from level_schedulers import get_level_scheduler
 from train import TrainResult
 
 
-def test_search_space_composes_valid_configs():
+def test_ppo_search_space_composes_valid_configs():
     params = {
         "learning_rate": 3e-4,
-        "gamma": 0.97,
-        "tau": 0.9,
-        "critic_loss_weight": 0.3,
-        "initial_entropy_loss_weight": 0.01,
+        "epochs_per_update": 8,
         "batch_size": 1024,
-        "epochs_per_update": 4,
+        "tau": 0.9,
+        "clip_param": 0.15,
+        "critic_loss_weight": 0.3,
     }
     overrides = tune.suggest_ppo(optuna.trial.FixedTrial(params))
     with initialize_config_dir(config_dir=tune.CONFIG_DIR, version_base="1.3"):
@@ -24,9 +23,8 @@ def test_search_space_composes_valid_configs():
 
     agent = config.agent
     assert agent.learning_rate.learning_rate == pytest.approx(3e-4)
-    assert (agent.gamma, agent.tau, agent.critic_loss_weight) == pytest.approx((0.97, 0.9, 0.3))
-    assert agent.initial_entropy_loss_weight == pytest.approx(0.01)
-    assert (agent.batch_size, agent.epochs_per_update) == (1024, 4)
+    assert (agent.epochs_per_update, agent.batch_size) == (8, 1024)
+    assert (agent.tau, agent.clip_param, agent.critic_loss_weight) == pytest.approx((0.9, 0.15, 0.3))
 
 
 def test_exploration_search_space_composes_valid_configs():

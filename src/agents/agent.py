@@ -22,6 +22,8 @@ class StepOutcome:
     final_states: np.ndarray | None = None
     # Exploration bonus on top of the game's reward
     bonus: np.ndarray | None = None
+    # Power-up each worker's episode started with, see Powerup; None if all start small
+    start_powerups: list[int] | None = None
 
     @property
     def dones(self) -> np.ndarray:

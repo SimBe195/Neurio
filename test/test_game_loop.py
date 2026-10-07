@@ -7,7 +7,7 @@ import environment
 from agents import Agent, StepOutcome
 from config.exploration import ExplorationConfig
 from config.levels import CurriculumLevelsConfig, SingleLevelConfig
-from environment import get_env_info, get_environment
+from environment import Powerup, get_env_info, get_environment
 from fakes import FakeMarioEnv, make_env_config
 from game_loop import GameLoop
 from level_schedulers import CurriculumLevelScheduler
@@ -103,6 +103,8 @@ def test_agent_gets_step_outcomes(vector_env, logged):
     assert ended.final_states[0].shape == truncated.final_states[1].shape == vector_env.single_observation_space.shape
     assert agent.outcomes[3].final_states is None
     assert ended.levels == ["1-1", "1-1"]
+    # 1-1 always starts small
+    assert ended.start_powerups == [Powerup.SMALL] * 2
     assert ended.bonus is None
 
 

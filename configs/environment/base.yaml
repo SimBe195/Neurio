@@ -12,3 +12,6 @@ subsampling_factor: 1
 grayscale: True
 # Scale of the game's reward, which is mostly 0-5 per frame for progress, -25 for dying and 50 for the flag
 reward_scale: 0.1
+# Probabilities of starting a level other than 1-1 small, big or with the fire flower, since in the full game Mario
+# carries power-ups over from the previous level
+start_powerup_probs: [0.5, 0.25, 0.25]

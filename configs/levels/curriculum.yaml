@@ -4,9 +4,11 @@ _target_: config.levels.CurriculumLevelsConfig
 levels: ["1-1", "1-2", "1-3", "1-4", "2-1", "2-2", "2-3", "2-4", "3-1", "3-2", "3-3", "3-4", "4-1", "4-2", "4-3", "4-4",
          "5-1", "5-2", "5-3", "5-4", "6-1", "6-2", "6-3", "6-4", "7-1", "7-2", "7-3", "7-4", "8-1", "8-2", "8-3", "8-4"]
 initial_levels: 1
-# Unlock the next level once the flag was reached in this fraction of the last `success_window` episodes on the
-# newest level, and on average over all unlocked levels, each with at least `min_level_episodes` recent episodes
+# Unlock the next level once the flag was reached in these fractions of the last `success_window` episodes on the
+# newest level and on average over all unlocked levels, each with at least `min_level_episodes` recent episodes. The
+# newest level only needs half, since hard ones like 2-2 stay below that for long.
 unlock_success_rate: 0.5
+unlock_mean_success_rate: 0.7
 success_window: 50
 min_level_episodes: 10
 # Levels are sampled proportionally to their failure rate, but at least with this weight

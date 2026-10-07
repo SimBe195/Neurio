@@ -16,6 +16,14 @@ follows:
 
 Each chosen action is held for 4 frames. The agent picks from the 12 button combinations of `COMPLEX_MOVEMENT`.
 
+In the full game, Mario carries power-ups over to the next level. So in training, episodes on levels other than 1-1
+start small, big or as fire Mario with probabilities 50/25/25% (`environment.start_powerup_probs`), set in the game's
+memory. 1-1, the full game and evaluation always start small.
+
+Episodes on single levels also start with a random action for 0–3 frames, one less than an action is held. Otherwise
+every episode on a level would play out in exactly the same timing, and the agent could learn one exact course that
+fails when it arrives a few frames off, as when it reaches 1-2 from 1-1 in the full game.
+
 **Reward.** The game's own reward, scaled by 0.1: progress to the right, a small time penalty, points, coins, power-ups,
 +50 for the flag and −25 for dying. Episode rewards in the metrics are always this reward, without the curiosity
 bonus below, so runs with different settings are comparable.
@@ -25,7 +33,8 @@ with 32/64/64 channels and a 256-unit layer) reads the frames; it generalizes be
 encoder ("Nature CNN", `agent/model=nature`). On the GPU the encoder runs in bfloat16. Together with an embedding of
 the previous action, it feeds two outputs: action logits (the actor) and a state value (the critic). Each iteration
 collects 128 steps per worker and trains 5 epochs on them. Advantages are normalized per minibatch. The entropy bonus
-decays from 0.013 to 0.001 over training.
+decays from 0.013 to 0.001 over the first 700 iterations (`agent.entropy_decay_updates`), as long as in the tuning runs.
+Spread over a long run instead, it kept the policy so random that its own best episodes drifted out of reach.
 
 **Curiosity.** `exploration.bonus_scale` (default 0.7, 0 disables it) pays a bonus of `scale / √visits` for reaching a
 position (level, 16-pixel x and y tile). Visits are counted across all workers. This lets the agent find its way
@@ -33,8 +42,9 @@ around dead ends that the game's reward makes attractive. Example: on 1-3, a jum
 reward than dying costs. The bonus is only used during training.
 
 **Self-imitation.** `agent.sil_loss_weight` (default 0.7, 0 disables it): the agent keeps its own 5 best episodes per
-level (by game reward, `agent.sil_episodes_per_level`) and, after each update, imitates their actions wherever their
-return beats its current value estimate. Curiosity makes the agent find better routes; self-imitation makes it learn
+level and start power-up (by game reward, `agent.sil_episodes_per_level`) and, after each update, imitates their actions
+wherever their return beats its current value estimate. Without the split by power-up, fire Mario's episodes took all
+places, and the agent unlearned the levels as small and big Mario. Curiosity makes the agent find better routes; self-imitation makes it learn
 them before it commits to a worse one.
 
 **Levels** (`levels=...`):
@@ -43,7 +53,7 @@ them before it commits to a worse one.
 |---|---|
 | `single` | one level, e.g. `levels.level=4-4` |
 | `random` | each episode on a random level from a list |
-| `curriculum` (default) | starts on 1-1 and unlocks the next level once the newest level and the average over all unlocked levels reach 50% success. Levels are sampled by failure rate, so forgotten levels get practiced again. |
+| `curriculum` (default) | starts on 1-1 and unlocks the next level once the newest level reaches 50% success and the average over all unlocked levels 70%. Levels are sampled by failure rate, so forgotten levels get practiced again. |
 | `progression` | the full game from 1-1, continuing after each flag. The episode ends at the first lost life. |
 | `tuning` | for hyperparameter search: `curriculum` over 1-1, 1-3, 2-2 and 4-1, each with a different mechanic |
 
@@ -114,7 +124,8 @@ uv run src/tune.py --study-name mechanics --search-space exploration --hours 10 
 ```
 
 - `--search-space` selects a search space defined in `src/tune.py`:
-  - `ppo`: learning rate, gamma, GAE tau, critic and entropy weights, batch size and epochs.
+  - `ppo`: how PPO learns from its experience: learning rate, epochs, batch size, GAE tau, clip range and critic
+    weight.
   - `exploration`: self-imitation weight and memory size, curiosity bonus scale, gamma, entropy weight and learning
     rate.
 - The objective is `recent_mean_reward` by default. With several levels, the mean reward mostly reflects which levels
@@ -223,3 +234,8 @@ Useful MLflow metrics:
 - **Network:** in one calibration run each on 1-1, 1-3, 2-2 and 4-1, IMPALA cleared every level earlier than the DQN
   encoder (2-2 at iteration 641 against 717) at almost the same training time. Swimming (2-2) took about 500 iterations
   with both, against 50–100 for the other levels.
+- **Mechanics tuning** (22 trials on 1-1, 1-3, 2-2 and 4-1, 700 iterations): the best trials scored as well as the
+  defaults (mean levels cleared 1.51 against 1.50). Gamma above 0.96, a curiosity bonus below 0.3 and an initial
+  entropy weight below 0.008 were clearly worse; the self-imitation weight (0.4–1.9), its memory size (6–51 episodes)
+  and the learning rate (1e-4–1e-3) hardly mattered. 2-2 stayed the bottleneck: the best runs reached its flag in 30–40%
+  of the episodes, dying to enemies all over the second half of the level rather than at one obstacle.

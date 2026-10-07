@@ -66,13 +66,19 @@ class GameLoop:
         # Finished episodes report their last step in final_info, the regular info already belongs to the next episode
         step_infos = [infos["final_info"] if done else infos for done in dones]
         levels = [f"{int(info['world'][w])}-{int(info['stage'][w])}" for w, info in enumerate(step_infos)]
+        # The full game reports no start power-up, it always starts small
+        start_powerups = (
+            [int(info["start_powerup"][w]) for w, info in enumerate(step_infos)] if "start_powerup" in infos else None
+        )
         bonus = None
         if self.novelty_bonus is not None:
             positions = [(levels[w], int(info["x_pos"][w]), int(info["y_pos"][w])) for w, info in enumerate(step_infos)]
             bonus = self.novelty_bonus(positions)
             self.iter_novelty_bonus += float(bonus.sum())
 
-        self.agent.give_reward(StepOutcome(rewards, terminated, truncated, levels, infos.get("final_obs"), bonus))
+        self.agent.give_reward(
+            StepOutcome(rewards, terminated, truncated, levels, infos.get("final_obs"), bonus, start_powerups)
+        )
         for worker in np.flatnonzero(dones):
             self.record_episode(infos["final_info"], int(worker), levels[worker])
 

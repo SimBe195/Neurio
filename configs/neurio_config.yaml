@@ -31,5 +31,4 @@ test_run_id: null
 test_iter: null
 
 agent:
-  total_updates: ${num_iters}
   exp_buffer_size: ${steps_per_iter}

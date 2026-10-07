@@ -8,10 +8,12 @@ import environment
 from config.levels import CurriculumLevelsConfig, ProgressionLevelsConfig, RandomLevelsConfig, SingleLevelConfig
 from environment import (
     ActionRepeatWrapper,
+    BaseEnvironment,
     ClipWrapper,
     EndOnLifeLossWrapper,
     GameViewerWrapper,
     LevelSelectEnv,
+    Powerup,
     SubsampleWrapper,
     get_base_environment,
     get_env_info,
@@ -100,6 +102,62 @@ def test_level_select_env_samples_from_distribution(fake_base_env):
     assert 0.65 < counts["2-3"] / 400 < 0.85
     # One emulator per level, created once and reused
     assert len(fake_base_env) == 2
+
+
+def test_levels_after_1_1_may_start_with_a_powerup(fake_base_env):
+    env = LevelSelectEnv(make_env_config(start_powerup_probs=[0.5, 0.25, 0.25]), ["1-1", "2-3"], [0.5, 0.5])
+    env.reset(seed=0)
+    for _ in range(400):
+        env.reset()
+    first, other = env._envs["1-1"], env._envs["2-3"]
+    # The game starts small, other levels are small in about half of the episodes
+    assert first.powerups == []
+    assert 0.35 < len(other.powerups) / other.num_resets < 0.65
+    assert set(other.powerups) == {Powerup.BIG, Powerup.FIRE}
+
+
+def test_episodes_start_with_random_frames(fake_base_env):
+    env = LevelSelectEnv(make_env_config(num_repeat_frames=4), ["2-3"], [1.0])
+    env.reset(seed=0)
+    frames = []
+    for _ in range(100):
+        game = env._envs["2-3"]
+        steps_before = len(game.actions)
+        env.reset()
+        frames.append(len(game.actions) - steps_before)
+    assert set(frames) == {0, 1, 2, 3}
+    assert len(set(env._envs["2-3"].actions)) > 1
+
+
+def test_steps_report_the_start_powerup(fake_base_env):
+    env = LevelSelectEnv(make_env_config(start_powerup_probs=[0.0, 0.0, 1.0]), ["2-3"], [1.0])
+    assert env.reset(seed=0)[1]["start_powerup"] == Powerup.FIRE
+    assert env.step(0)[-1]["start_powerup"] == Powerup.FIRE
+
+
+def test_powerup_in_the_game():
+    """In the real game, a power-up lets Mario survive the first Goomba of 1-1 by shrinking."""
+    env = BaseEnvironment(make_env_config(complex_movement=True), level="1-1")
+    try:
+        # The frames are views of the emulator's screen, so they are copied
+        small = env.reset()[0].copy()
+        big = env.set_powerup(Powerup.BIG)[0].copy()
+        env.reset()
+        fire, info = env.set_powerup(Powerup.FIRE)
+        assert info["status"] == "fireball"
+        # Big Mario is drawn taller, fire Mario in other colors
+        assert (big != small).any() and (fire != big).any()
+        # The power-up does not count as collected
+        _, reward, *_ = env.step(0)
+        assert reward <= 0
+        for _ in range(200):
+            _, _, terminated, _, info = env.step(1)
+            assert not terminated
+            if info["status"] == "small":
+                break
+        assert info["status"] == "small" and info["life"] == 2
+    finally:
+        env.close()
 
 
 def test_level_select_env_distribution_can_change(fake_base_env):

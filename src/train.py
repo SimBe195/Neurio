@@ -91,6 +91,9 @@ def load_run_config(run_id: str) -> DictConfig:
         path = mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path=CONFIG_ARTIFACT, dst_path=directory)
         cfg = OmegaConf.load(path)
     assert isinstance(cfg, DictConfig)
+    # Older runs decayed the entropy weight over all of training
+    if "total_updates" in cfg.agent:
+        cfg.agent.entropy_decay_updates = cfg.agent.pop("total_updates")
     return cfg
 
 

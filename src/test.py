@@ -50,6 +50,8 @@ def evaluation_config(run_id: str, cli_cfg: DictConfig, levels_overridden: bool)
     except Exception as e:
         raise RuntimeError(f"Could not load {CONFIG_ARTIFACT} of run {run_id}, runs of older versions lack it.") from e
     run_cfg.num_workers = 1
+    # Like the full game, single levels start small
+    run_cfg.environment.start_powerup_probs = [1.0, 0.0, 0.0]
     if levels_overridden:
         run_cfg.levels = cli_cfg.levels
     else:
