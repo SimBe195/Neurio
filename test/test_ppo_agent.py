@@ -161,9 +161,11 @@ def test_truncated_episodes_are_bootstrapped(agent):
     # Worker 0 terminated, worker 1 was truncated
     agent.give_reward(_outcome([1.0, 1.0], [True, False], [False, True], final_states))
 
+    # The value of the final state is already on the scale the critic learns
     rewards = agent.experience_buffer.get_reward_buffer()[-1]
-    assert rewards[0] == pytest.approx(1.0)
-    assert rewards[1] == pytest.approx(1.0 + agent.config.gamma * final_values[1].item(), rel=1e-5)
+    std = agent.reward_scale.std
+    assert rewards[0] == pytest.approx(1.0 / std)
+    assert rewards[1] == pytest.approx(1.0 / std + agent.config.gamma * final_values[1].item(), rel=1e-5)
     assert agent.experience_buffer.get_dones_buffer()[-1].tolist() == [1, 1]
     assert agent.experience_buffer.get_last_actions().tolist() == [0, 0]
 
@@ -172,7 +174,8 @@ def test_no_bootstrap_without_truncation(agent):
     agent.feed_observation(_random_states(np.random.default_rng(4)))
     agent.next_actions()
     agent.give_reward(_outcome([1.0, 2.0], [True, False], [False, False]))
-    assert agent.experience_buffer.get_reward_buffer()[-1].tolist() == [1.0, 2.0]
+    rewards = agent.experience_buffer.get_reward_buffer()[-1] * agent.reward_scale.std
+    assert rewards.tolist() == pytest.approx([1.0, 2.0])
 
 
 @pytest.mark.parametrize(
@@ -230,4 +233,5 @@ def test_single_head_adds_bonus_to_reward(agent):
     agent.feed_observation(_random_states(np.random.default_rng(7)))
     agent.next_actions()
     agent.give_reward(_outcome([1.0, 2.0], [False, False], [False, False], bonus=[0.5, 0.25]))
-    assert agent.experience_buffer.get_reward_buffer()[-1].tolist() == [1.5, 2.25]
+    rewards = agent.experience_buffer.get_reward_buffer()[-1] * agent.reward_scale.std
+    assert rewards.tolist() == pytest.approx([1.5, 2.25])

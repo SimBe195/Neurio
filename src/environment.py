@@ -336,6 +336,21 @@ class SubsampleWrapper(ObservationWrapper):
         return result
 
 
+class FlagRewardWrapper(Wrapper):
+    """Replaces the game's reward for reaching the flag with the configured one."""
+
+    def __init__(self, config: EnvironmentConfig, env: Env) -> None:
+        super().__init__(env)
+        self.flag_reward = config.flag_reward
+
+    def step(self, action: int) -> StepType:
+        state, reward, terminated, truncated, info = super().step(action)
+        completion = info["reward_components"]["completion"]
+        if completion:
+            reward = float(reward) - completion + self.flag_reward
+        return state, reward, terminated, truncated, info
+
+
 class ActionRepeatWrapper(Wrapper):
     """
     This class represents a wrapper for the game environment that repeats the same action for multiple steps.
@@ -370,6 +385,37 @@ class ActionRepeatWrapper(Wrapper):
         return state, total_reward, terminated, truncated, metrics
 
 
+class NoProgressTruncation(Wrapper):
+    """
+    Truncates the episode once Mario has not got further to the right for a number of steps, so that dead ends where
+    he can only wait for the time to run out take up little of the training. Truncated rather than ended as a death,
+    since waiting is part of the game: the agent learns from the value of the last state as if the episode went on.
+    Entering another area, e.g. through a pipe, counts as progress.
+    """
+
+    def __init__(self, config: EnvironmentConfig, env: Env) -> None:
+        super().__init__(env)
+        assert config.max_steps_without_progress is not None
+        self.max_steps = config.max_steps_without_progress
+        self._area: tuple[int, int, int] | None = None
+        self._max_x = 0
+        self._steps = 0
+
+    def reset(self, **kwargs) -> tuple[Any, dict[str, Any]]:
+        observation, info = super().reset(**kwargs)
+        self._area = None
+        return observation, info
+
+    def step(self, action: int) -> StepType:
+        state, reward, terminated, truncated, info = super().step(action)
+        area = (info["world"], info["stage"], info["area"])
+        if area != self._area or info["x_pos"] > self._max_x:
+            self._area, self._max_x, self._steps = area, info["x_pos"], 0
+        else:
+            self._steps += 1
+        return state, reward, terminated, truncated or self._steps >= self.max_steps, info
+
+
 def get_environment(
     config: EnvironmentConfig,
     levels: LevelConfig,
@@ -392,8 +438,11 @@ def get_environment(
         env = GrayscaleObservation(env, keep_dim=True)
     env = ClipWrapper(config, env)
     env = SubsampleWrapper(config, env)
+    env = FlagRewardWrapper(config, env)
     env = TransformReward(env, lambda reward: float(reward) * config.reward_scale)
     env = ActionRepeatWrapper(config, env)
+    if config.max_steps_without_progress is not None:
+        env = NoProgressTruncation(config, env)
     env = FrameStackObservation(env, config.num_stack_frames)
     env = RecordEpisodeStatistics(env)
     return env

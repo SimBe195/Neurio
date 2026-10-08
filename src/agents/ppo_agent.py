@@ -17,6 +17,7 @@ from models import get_model
 from .advantage import GaeEstimator
 from .agent import Agent, StepOutcome
 from .experience_buffer import ExperienceBuffer
+from .reward_scale import RewardScale
 from .self_imitation import SelfImitationMemory
 
 log = logging.getLogger(__name__)
@@ -64,6 +65,7 @@ class PPOAgent(Agent):
             self.device = self.cpu
             log.info("Using CPU")
 
+        self.reward_scale = RewardScale(self.num_workers, self.config.gamma, self.device)
         self.experience_buffer = ExperienceBuffer(
             self.num_workers, size=self.config.exp_buffer_size, device=self.device
         )
@@ -92,6 +94,7 @@ class PPOAgent(Agent):
             "update_step": self.update_step,
             "sampling_strategy": self.sampling_strategy.state_dict(),
             "self_imitation": self.self_imitation.state_dict() if self.self_imitation is not None else {},
+            "reward_scale": self.reward_scale.state_dict(),
         }
 
     def load_state_dict(self, state: dict) -> None:
@@ -101,6 +104,9 @@ class PPOAgent(Agent):
         self.sampling_strategy.load_state_dict(state["sampling_strategy"])
         if self.self_imitation is not None:
             self.self_imitation.load_state_dict(state["self_imitation"])
+        # Runs started before rewards were scaled
+        if "reward_scale" in state:
+            self.reward_scale.load_state_dict(state["reward_scale"])
 
     def _compute_probs_values(
         self,
@@ -151,6 +157,8 @@ class PPOAgent(Agent):
             self.self_imitation.record_rewards(rewards, outcome.dones.tolist(), outcome.levels, outcome.start_powerups)
         if outcome.bonus is not None:
             rewards += torch.tensor(outcome.bonus, dtype=torch.float32, device=self.device)
+        dones = torch.tensor(outcome.dones, device=self.device)
+        rewards = self.reward_scale(rewards, dones)
 
         # A truncated episode did not end in the environment, so its return continues beyond the final state.
         # Since the final state is replaced by the next episode's start, fold its discounted value into the reward.
@@ -167,7 +175,7 @@ class PPOAgent(Agent):
             rewards[worker_idx] += self.gae_estimator.gamma * final_values
 
         self.experience_buffer.buffer_rewards(rewards)
-        self.experience_buffer.buffer_dones(torch.tensor(outcome.dones, device=self.device))
+        self.experience_buffer.buffer_dones(dones)
 
     def save(self, save_iter: int) -> None:
         for name, module in self._checkpointed.items():
@@ -371,6 +379,8 @@ class PPOAgent(Agent):
             if batch is None:
                 break
             states, prev_actions, actions, returns = (tensor.to(self.device) for tensor in batch)
+            # The memory keeps the game's returns, the critic learns them scaled
+            returns = returns / self.reward_scale.std
             logits, values = self.actor_critic.forward(states.to(torch.float32), prev_actions)
             advantages = torch.clamp(returns - values, min=0)
             weights = advantages.detach()

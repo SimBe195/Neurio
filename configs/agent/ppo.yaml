@@ -7,7 +7,7 @@ defaults:
 
 _target_: config.agent.PPOAgentConfig
 
-gamma: 0.95
+gamma: 0.98
 tau: 0.95
 # Set to steps_per_iter in the main config, so that every update trains only on data of the current policy
 exp_buffer_size: 128

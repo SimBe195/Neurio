@@ -76,7 +76,7 @@ def test_train_logs_run(cfg):
     assert run.data.tags["overrides"] == " ".join(overrides)
     assert run.data.tags["purpose"] == "test"
     assert run.data.tags["from_config"] == "yes"
-    assert run.data.params["agent.gamma"] == "0.95"
+    assert run.data.params["agent.gamma"] == "0.98"
     assert {CONFIG_ARTIFACT, "actor_critic-0002", "actor_critic-0003"} <= set(_artifacts(result.run_id))
 
     history = mlflow.MlflowClient().get_metric_history(result.run_id, "recent_mean_reward")

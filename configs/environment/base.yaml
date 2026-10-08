@@ -10,8 +10,14 @@ clip_left: 0
 clip_right: 0
 subsampling_factor: 1
 grayscale: True
-# Scale of the game's reward, which is mostly 0-5 per frame for progress, -25 for dying and 50 for the flag
+# Scale of the game's reward, which is mostly 0-5 per frame for progress and -25 for dying
 reward_scale: 0.1
+# Instead of the game's 50, which is worth only 50 pixels of progress: dead ends further to the right, like the warp
+# zone of 1-2, would otherwise pay more than finishing the level
+flag_reward: 500
 # Probabilities of starting a level other than 1-1 small, big or with the fire flower, since in the full game Mario
-# carries power-ups over from the previous level
-start_powerup_probs: [0.5, 0.25, 0.25]
+# carries power-ups over from the previous level. Mostly small, since the agent rarely collects power-ups.
+start_powerup_probs: [0.7, 0.15, 0.15]
+# About 10 seconds of play without getting further to the right, e.g. at a wall or in front of an enemy the agent does
+# not dare to pass, which would otherwise last until the time runs out
+max_steps_without_progress: 150

@@ -11,8 +11,10 @@ from environment import (
     BaseEnvironment,
     ClipWrapper,
     EndOnLifeLossWrapper,
+    FlagRewardWrapper,
     GameViewerWrapper,
     LevelSelectEnv,
+    NoProgressTruncation,
     Powerup,
     SubsampleWrapper,
     get_base_environment,
@@ -69,6 +71,46 @@ def test_action_repeat_sums_rewards_and_stops_at_termination():
     _, reward, terminated, _, _ = env.step(1)
     assert reward == 9.0 and terminated
     assert fake.actions == [2, 2, 2, 1, 1]
+
+
+def test_flag_reward_replaces_the_games():
+    env = FlagRewardWrapper(make_env_config(flag_reward=500), FakeMarioEnv(rewards=[1.0, 53.0], flag_get=True))
+    env.reset()
+    assert env.step(0)[1] == 1.0
+    assert env.step(0)[1] == 503.0
+
+
+class StuckMarioEnv(FakeMarioEnv):
+    """Gets to x = 30, then stays there. Changes the area at the steps in `area_changes`."""
+
+    def __init__(self, area_changes: tuple[int, ...] = (), **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.area_changes = area_changes
+
+    def _info(self, **kwargs) -> dict:
+        return {
+            **super()._info(**kwargs),
+            "x_pos": min(10 * self.t, 30),
+            "area": 1 + sum(self.t >= t for t in self.area_changes),
+        }
+
+
+def test_episode_without_progress_is_truncated():
+    env = NoProgressTruncation(make_env_config(max_steps_without_progress=4), StuckMarioEnv(rewards=[1.0] * 20))
+    for _ in range(2):
+        env.reset()
+        # Progress up to step 3, then 4 steps without
+        truncated = [env.step(0)[3] for _ in range(7)]
+        assert truncated == [False] * 6 + [True]
+
+
+def test_new_area_counts_as_progress():
+    env = NoProgressTruncation(
+        make_env_config(max_steps_without_progress=4), StuckMarioEnv(rewards=[1.0] * 20, area_changes=(6,))
+    )
+    env.reset()
+    truncated = [env.step(0)[3] for _ in range(10)]
+    assert truncated == [False] * 9 + [True]
 
 
 def test_full_wrapper_stack(fake_base_env):

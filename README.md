@@ -17,19 +17,33 @@ follows:
 Each chosen action is held for 4 frames. The agent picks from the 12 button combinations of `COMPLEX_MOVEMENT`.
 
 In the full game, Mario carries power-ups over to the next level. So in training, episodes on levels other than 1-1
-start small, big or as fire Mario with probabilities 50/25/25% (`environment.start_powerup_probs`), set in the game's
-memory. 1-1, the full game and evaluation always start small.
+start small, big or as fire Mario with probabilities 70/15/15% (`environment.start_powerup_probs`), set in the game's
+memory. Mostly small, since the agent rarely stops to collect power-ups and plays the full game small. 1-1, the full
+game and evaluation always start small.
 
 Episodes on single levels also start with a random action for 0–3 frames, one less than an action is held. Otherwise
 every episode on a level would play out in exactly the same timing, and the agent could learn one exact course that
 fails when it arrives a few frames off, as when it reaches 1-2 from 1-1 in the full game.
 
 **Reward.** The game's own reward, scaled by 0.1: progress to the right, a small time penalty, points, coins, power-ups,
-+50 for the flag and −25 for dying. Episode rewards in the metrics are always this reward, without the curiosity
-bonus below, so runs with different settings are comparable.
+the flag and −25 for dying. The game pays 50 for the flag, as much as 50 pixels of progress, so dead ends further to
+the right paid more than finishing: in 1-2 the agent ran over the ceiling past the exit pipe into the warp zone and
+waited there until the time ran out. The flag pays 500 instead (`environment.flag_reward`). Episode rewards in the
+metrics are always this reward, without the curiosity bonus below, so runs with different settings are comparable.
 
-**Agent.** PPO with generalized advantage estimation (GAE) and gamma 0.95. The IMPALA residual encoder (3 stages
-with 32/64/64 channels and a 256-unit layer) reads the frames; it generalizes better to unseen levels than the DQN
+For learning, the reward plus curiosity bonus is divided by the running standard deviation of the discounted return,
+as in Stable-Baselines3 and CleanRL. Without it, gamma 0.98 and the larger flag reward made the critic's loss about 6
+times larger. It outweighed the policy in the shared network, the policy became almost deterministic, and the agent
+ended up standing in front of the first pipe of 1-1 until the time ran out.
+
+An episode is truncated after 150 steps without a new furthest position (`environment.max_steps_without_progress`;
+entering another area counts as progress), so that dead ends do not fill the training with thousands of steps of
+waiting. Truncated, not ended as a death: the agent learns from the value of the last state as if the episode went on,
+so waiting costs what it costs in the game.
+
+**Agent.** PPO with generalized advantage estimation (GAE) and gamma 0.98, so that the flag still counts about 40 steps
+ahead, where the route to it is decided. The IMPALA residual encoder (3 stages with 32/64/64 channels and a 256-unit
+layer) reads the frames; it generalizes better to unseen levels than the DQN
 encoder ("Nature CNN", `agent/model=nature`). On the GPU the encoder runs in bfloat16. Together with an embedding of
 the previous action, it feeds two outputs: action logits (the actor) and a state value (the critic). Each iteration
 collects 128 steps per worker and trains 5 epochs on them. Advantages are normalized per minibatch. The entropy bonus

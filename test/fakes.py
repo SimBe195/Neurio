@@ -64,9 +64,11 @@ class FakeMarioEnv(gymnasium.Env):
             "y_pos": 79,
             "world": self.world,
             "stage": self.stage,
+            "area": 1,
             "flag_get": flag_get,
             "is_dying": dying,
             "is_dead": False,
+            "reward_components": {"completion": 50.0 if flag_get else 0.0},
         }
 
     def render(self):
