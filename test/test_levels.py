@@ -3,7 +3,6 @@ import pytest
 from config.levels import (
     ALL_LEVELS,
     CurriculumLevelsConfig,
-    ProgressionLevelsConfig,
     RandomLevelsConfig,
     SingleLevelConfig,
     level_index,
@@ -31,27 +30,34 @@ def test_duplicate_levels_are_rejected():
 def test_distributions():
     assert SingleLevelConfig("4-2").initial_distribution() == (["4-2"], [1.0])
     assert RandomLevelsConfig(["1-1", "1-2"]).initial_distribution() == (["1-1", "1-2"], [0.5, 0.5])
-    assert ProgressionLevelsConfig().initial_distribution() is None
 
     curriculum = CurriculumLevelsConfig(levels=["1-1", "1-2", "1-3", "1-4"], initial_levels=2, min_level_weight=0.1)
     # Without results, all unlocked levels are equally likely
     assert curriculum.initial_distribution() == (["1-1", "1-2"], [0.5, 0.5])
-    assert curriculum.evaluation_distribution() == (curriculum.levels, [0.25] * 4)
+    assert curriculum.evaluation_levels() == curriculum.levels
+    assert SingleLevelConfig("4-2").evaluation_levels() == ["4-2"]
 
 
 def test_names():
     assert SingleLevelConfig("1-1").name == "1-1"
     assert RandomLevelsConfig().name == "random-32"
     assert CurriculumLevelsConfig().name == "curriculum-32"
-    assert ProgressionLevelsConfig().name == "progression"
 
 
 def test_static_scheduler():
-    scheduler = get_level_scheduler(RandomLevelsConfig(["1-1", "1-2"]))
+    scheduler = get_level_scheduler(RandomLevelsConfig(["1-1", "1-2"], success_window=2))
     assert type(scheduler) is LevelScheduler
-    scheduler.record_episode("1-1", True)
+    for flag_get, distance in [(False, 100), (True, 3000), (True, 3200)]:
+        scheduler.record_episode("1-1", flag_get, distance)
     assert not scheduler.update()
     assert scheduler.distribution() == (["1-1", "1-2"], [0.5, 0.5])
+    # The results of the last two episodes, of levels without any none
+    assert scheduler.get_metrics() == {
+        "levels/cleared": 1.0,
+        "levels/cleared_mean": 1.0,
+        "levels/success_1-1": 1.0,
+        "levels/distance_1-1": 3100.0,
+    }
 
 
 def _curriculum(**kwargs) -> CurriculumLevelScheduler:
@@ -63,7 +69,7 @@ def _curriculum(**kwargs) -> CurriculumLevelScheduler:
 
 def _record(scheduler, level, results):
     for success in results:
-        scheduler.record_episode(level, success)
+        scheduler.record_episode(level, success, 3000 if success else 1000)
 
 
 def test_curriculum_unlocks_after_mastery():
@@ -78,10 +84,11 @@ def test_curriculum_unlocks_after_mastery():
     assert scheduler.num_unlocked == 2
     assert scheduler.distribution()[0] == ["1-1", "1-2"]
     assert scheduler.get_metrics() == {
-        "num_unlocked_levels": 2,
-        "success_rate_1-1": 0.5,
-        "levels_cleared_score": 0.5,
-        "mean_levels_cleared_score": pytest.approx((2 / 3 + 0.5) / 2),
+        "levels/unlocked": 2,
+        "levels/success_1-1": 0.5,
+        "levels/distance_1-1": 2000.0,
+        "levels/cleared": 0.5,
+        "levels/cleared_mean": pytest.approx((2 / 3 + 0.5) / 2),
     }
 
 
@@ -173,12 +180,11 @@ def test_mean_score_over_updates():
 
 def test_curriculum_score_and_unknown_levels():
     scheduler = _curriculum(initial_levels=2)
-    scheduler.record_episode("8-4", True)
+    scheduler.record_episode("8-4", True, 3000)
     assert scheduler.score() == 0.0
     _record(scheduler, "1-1", [True, False])
     _record(scheduler, "1-2", [True])
     assert scheduler.score() == pytest.approx(1.5)
-    assert LevelScheduler(SingleLevelConfig()).score() is None
 
 
 def test_curriculum_state_is_restored():

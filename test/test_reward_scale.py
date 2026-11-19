@@ -1,6 +1,6 @@
 import torch
 
-from agents.reward_scale import RewardScale
+from agents.ppo.reward_scale import RewardScale
 
 
 def test_scaled_returns_have_unit_std():

@@ -24,22 +24,25 @@ def level_index(level: str) -> int:
 @dataclass
 class LevelConfig(ABC):
     """
-    Determines which levels the agent plays. Single stage modes sample a level at the start of each episode and end
-    the episode when Mario dies or reaches the flag.
+    Determines which levels the agent plays. A level is sampled at the start of each episode, which starts with small
+    Mario and ends when he dies or reaches the flag.
     """
+
+    # Number of most recent episodes per level whose results are reported, see level_schedulers.LevelScheduler
+    success_window: int = field(default=50, kw_only=True)
 
     @property
     @abstractmethod
     def name(self) -> str: ...
 
     @abstractmethod
-    def initial_distribution(self) -> LevelDistribution | None:
-        """Levels and their sampling probabilities at the start of training, None if levels are not sampled."""
+    def initial_distribution(self) -> LevelDistribution:
+        """Levels and their sampling probabilities at the start of training."""
         ...
 
-    def evaluation_distribution(self) -> LevelDistribution | None:
-        """Levels and their sampling probabilities for evaluating a trained agent."""
-        return self.initial_distribution()
+    def evaluation_levels(self) -> list[str]:
+        """Levels a trained agent is evaluated on, in the order test.py plays them."""
+        return self.initial_distribution()[0]
 
 
 def _uniform(levels: list[str]) -> LevelDistribution:
@@ -81,7 +84,7 @@ class RandomLevelsConfig(LevelConfig):
 @dataclass
 class CurriculumLevelsConfig(LevelConfig):
     """
-    Starts with the first `initial_levels` levels and adds the next level to the pool once the agent masters the
+    Starts with the first `initial_levels` levels and adds the next level to the pool once the agent can play the
     pool: the flag was reached in at least `unlock_success_rate` of the last `success_window` episodes on the newest
     level, and in at least `unlock_mean_success_rate` on average over all unlocked levels, each of which needs at least
     `min_level_episodes` recent episodes. Levels the agent forgot therefore block progress, while a single hard level
@@ -95,7 +98,6 @@ class CurriculumLevelsConfig(LevelConfig):
     initial_levels: int = 1
     unlock_success_rate: float = 0.5
     unlock_mean_success_rate: float = 0.5
-    success_window: int = 50
     min_level_episodes: int = 10
     min_level_weight: float = 0.1
 
@@ -115,20 +117,5 @@ class CurriculumLevelsConfig(LevelConfig):
     def initial_distribution(self) -> LevelDistribution:
         return _uniform(self.levels[: self.initial_levels])
 
-    def evaluation_distribution(self) -> LevelDistribution:
-        return _uniform(self.levels)
-
-
-@dataclass
-class ProgressionLevelsConfig(LevelConfig):
-    """
-    Plays the full game from 1-1 on: after reaching the flag, the agent continues with the next level. The episode
-    ends when Mario loses his first life.
-    """
-
-    @property
-    def name(self) -> str:
-        return "progression"
-
-    def initial_distribution(self) -> None:
-        return None
+    def evaluation_levels(self) -> list[str]:
+        return list(self.levels)

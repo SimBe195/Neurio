@@ -44,8 +44,6 @@ PARALLEL = 2
 SECONDS_PER_RUN = ITERS * 6.5 + 25
 # Number of final iterations whose episodes are averaged for the final values
 FINAL_ITERS = 50
-# Positions beyond this are rare reading errors of the game's memory
-MAX_PLAUSIBLE_X = 5000
 
 COMMON = [
     "levels=single",
@@ -165,21 +163,20 @@ def start(args: argparse.Namespace) -> None:
     )
 
 
-def run_results(mlflow, run_id: str) -> dict[str, float]:
+def run_results(mlflow, run_id: str, level: str) -> dict[str, float]:
     client = mlflow.MlflowClient()
 
     def history(key: str) -> list[float]:
         return [m.value for m in sorted(client.get_metric_history(run_id, key), key=lambda m: m.step)]
 
-    x_mean, x_max, flags = history("episode_x_pos_mean"), history("episode_x_pos_max"), history("flag_rate")
-    smoothed = [sum(x_mean[i - 9 : i + 1]) / 10 for i in range(9, len(x_mean))]
+    # Both over the level's recent episodes, see level_schedulers.LevelScheduler
+    x_mean, flags = history(f"levels/x_{level}"), history(f"levels/success_{level}")
     return {
         "final_flag_rate": sum(flags[-FINAL_ITERS:]) / len(flags[-FINAL_ITERS:]),
         "flagged": sum(flags) > 0,
         "first_flag": next((i for i, rate in enumerate(flags) if rate > 0), math.inf),
         "final_x": sum(x_mean[-FINAL_ITERS:]) / len(x_mean[-FINAL_ITERS:]),
-        "best_x": max(smoothed) if smoothed else math.nan,
-        "max_x": max((x for x in x_max if x < MAX_PLAUSIBLE_X), default=math.nan),
+        "best_x": max(x_mean, default=math.nan),
     }
 
 
@@ -220,18 +217,18 @@ def report(args: argparse.Namespace) -> None:
     results: dict[tuple[str, str], list[dict[str, float]]] = {}
     for run in runs:
         results.setdefault((run.data.tags["level"], run.data.tags["variant"]), []).append(
-            run_results(mlflow, run.info.run_id)
+            run_results(mlflow, run.info.run_id, run.data.tags["level"])
         )
 
     print("Per level and variant, mean over runs (range):")
-    print(f"  final flags: share of episodes reaching the flag in the last {FINAL_ITERS} iterations")
+    print(f"  final flags: share of the recent episodes reaching the flag, over the last {FINAL_ITERS} iterations")
     print("  runs with flag: runs that reached the flag at all, p: Fisher exact test against the baseline")
-    print(f"  final x / best x: mean distance in the last {FINAL_ITERS} iterations / best 10-iteration mean")
+    print(f"  final x / best x: mean end position of the recent episodes in the last {FINAL_ITERS} iterations / best")
     for level in LEVELS:
         print(f"\n{level}")
         print(
             f"  {'variant':12s} {'runs':>4s} {'final flags':>14s} {'runs with flag':>15s} {'p':>5s} "
-            f"{'first flag':>11s} {'final x':>16s} {'best x':>16s} {'max x':>6s}"
+            f"{'first flag':>11s} {'final x':>16s} {'best x':>16s}"
         )
         base = results.get((level, BASELINE_VARIANT), [])
         for name, _ in VARIANTS:
@@ -250,7 +247,7 @@ def report(args: argparse.Namespace) -> None:
             print(
                 f"  {name:12s} {len(values):4d} {summary(values, 'final_flag_rate', 100, '%'):>14s} "
                 f"{flagged:>9d} / {len(values):<3d} {p:5.2f} {first:>11s} {summary(values, 'final_x'):>16s} "
-                f"{summary(values, 'best_x'):>16s} {max(r['max_x'] for r in values):6.0f}"
+                f"{summary(values, 'best_x'):>16s}"
             )
 
 

@@ -1,0 +1,3 @@
+[submodule "external/nes-py"]
+	path = external/nes-py
+	url = https://github.com/Kautenja/nes-py.git

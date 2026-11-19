@@ -4,7 +4,7 @@ trials are stopped early based on the objective reported after each iteration.
 
 Usage:
     uv run src/tune.py --study-name mechanics --search-space exploration --hours 10 --warmup-iters 250 -- \
-        levels=tuning objective=mean_levels_cleared_score num_iters=700
+        levels=tuning objective=cleared_mean num_iters=700
 
 Everything after `--` are Hydra overrides applied to every trial. The study is stored in `--storage`, so it can be
 resumed by running the same command again, run from several processes at once, and inspected with
@@ -41,11 +41,10 @@ def suggest_ppo(trial: optuna.Trial) -> list[str]:
 
 
 def suggest_exploration(trial: optuna.Trial) -> list[str]:
-    """Self-imitation and curiosity jointly with the main PPO settings."""
+    """Self-imitation jointly with the main PPO settings."""
     return [
         f"agent.sil_loss_weight={trial.suggest_float('sil_loss_weight', 0.1, 3.0, log=True)}",
         f"agent.sil_episodes_per_level={trial.suggest_int('sil_episodes_per_level', 4, 64, log=True)}",
-        f"exploration.bonus_scale={trial.suggest_float('bonus_scale', 0.1, 2.0, log=True)}",
         f"agent.gamma={trial.suggest_float('gamma', 0.9, 0.995)}",
         f"agent.initial_entropy_loss_weight={trial.suggest_float('initial_entropy_loss_weight', 3e-3, 3e-2, log=True)}",
         f"agent.learning_rate.learning_rate={trial.suggest_float('learning_rate', 1e-4, 1e-3, log=True)}",
@@ -70,9 +69,7 @@ def objective(trial: optuna.Trial, study_name: str, fixed_overrides: list[str], 
     with initialize_config_dir(config_dir=CONFIG_DIR, version_base="1.3"):
         cfg = compose("neurio_config", overrides=overrides)
 
-    def on_iteration(iteration: int, value: float | None) -> bool:
-        if value is None:
-            return False
+    def on_iteration(iteration: int, value: float) -> bool:
         trial.report(value, iteration)
         return trial.should_prune()
 

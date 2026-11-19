@@ -7,34 +7,42 @@ import environment
 from agents import Agent, StepOutcome
 from config.exploration import ExplorationConfig
 from config.levels import CurriculumLevelsConfig, SingleLevelConfig
-from environment import Powerup, get_env_info, get_environment
-from fakes import FakeMarioEnv, make_env_config
+from environment import LevelSelectEnv, Powerup, get_env_info, get_environment
+from evaluation import play_levels
+from exploration import NoveltyBonus, UntriedActions
+from fakes import FakeMarioEnv, WarpingMarioEnv, make_env_config
 from game_loop import GameLoop
-from level_schedulers import CurriculumLevelScheduler
-from novelty import NoveltyBonus
+from level_schedulers import CurriculumLevelScheduler, LevelScheduler
 
 
 class RecordingAgent(Agent):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.observations: list[np.ndarray] = []
+        self.greedy: list[bool] = []
+        self.untried: list[np.ndarray | None] = []
         self.outcomes: list[StepOutcome] = []
-        self.update_states: list[np.ndarray] = []
-        self.update_episode_rewards: list[float | None] = []
+        self.updates = 0
+        # Number of actions chosen when each training while playing started
+        self.trained_after: list[int] = []
 
-    def feed_observation(self, state: np.ndarray) -> None:
-        self.observations.append(np.array(state))
+    def act(self, observations: np.ndarray, greedy: bool = False, untried: np.ndarray | None = None) -> list[int]:
+        self.observations.append(np.array(observations))
+        self.greedy.append(greedy)
+        self.untried.append(untried)
+        return [0] * self.num_workers
 
-    def next_actions(self) -> tuple[list[int], list[float]]:
-        return [0] * self.num_workers, [0.0] * self.num_workers
-
-    def give_reward(self, outcome: StepOutcome) -> None:
+    def observe(self, outcome: StepOutcome) -> None:
+        # The observations are views of the environments' shared memory
+        outcome.observations = np.array(outcome.observations)
         self.outcomes.append(outcome)
 
-    def update(self, next_states: np.ndarray, episode_reward: float | None = None) -> dict[str, float]:
-        self.update_states.append(np.array(next_states))
-        self.update_episode_rewards.append(episode_reward)
-        return {"actor_loss": 1.5}
+    def train_while_playing(self) -> None:
+        self.trained_after.append(len(self.observations))
+
+    def update(self) -> dict[str, float]:
+        self.updates += 1
+        return {"behavior/entropy": 1.5}
 
 
 def make_vector_env(envs) -> AsyncVectorEnv:
@@ -64,28 +72,24 @@ def logged(monkeypatch):
 
 def test_logs_one_batch_per_iteration(vector_env, logged):
     agent = RecordingAgent(None, get_env_info(vector_env))
-    loop = GameLoop(vector_env, agent, objective_window=10)
+    loop = GameLoop(vector_env, agent, LevelScheduler(SingleLevelConfig()))
     loop.run_train_iter(steps=5)
 
     assert len(logged) == 1
     metrics, step = logged[0]
-    # Steps of all workers combined
-    assert step == 10 == loop.total_env_steps
-    assert metrics["iteration"] == 0
-    assert metrics["actor_loss"] == 1.5
-    # Worker 0 finished an episode of 3 steps, worker 1 one of 5 steps, with rewards of 10 per step scaled by 0.1
-    assert metrics["episodes"] == 2
-    assert metrics["episode_reward_mean"] == pytest.approx(4.0)
-    assert metrics["episode_reward_max"] == pytest.approx(5.0)
-    assert metrics["episode_length_mean"] == pytest.approx(4.0)
-    assert metrics["episode_x_pos_max"] == 50
-    assert metrics["episode_level_index_max"] == 0
-    assert metrics["flag_rate"] == 0.0
-    assert metrics["recent_mean_reward"] == pytest.approx(4.0) == loop.recent_mean_reward
-    assert agent.update_episode_rewards == [pytest.approx(4.0)]
+    # The iteration is the step, the steps of all workers combined a metric
+    assert step == 1
+    assert metrics["progress/env_steps"] == 10 == loop.total_env_steps
+    assert metrics["behavior/entropy"] == 1.5
+    # Worker 0 ended at x 30, worker 1 at x 50, neither with the flag
+    assert metrics["levels/success_1-1"] == 0.0
+    assert metrics["levels/distance_1-1"] == 40.0
+    assert metrics["levels/cleared"] == 0.0
+    # Trained while the workers played each step, and after the iteration
+    assert agent.trained_after == [1, 2, 3, 4, 5] and agent.updates == 1
 
     loop.run_train_iter(steps=5)
-    assert logged[1][1] == 20 and logged[1][0]["iteration"] == 1
+    assert logged[1][1] == 2 and logged[1][0]["progress/env_steps"] == 20
 
 
 def test_agent_gets_step_outcomes(vector_env, logged):
@@ -93,52 +97,96 @@ def test_agent_gets_step_outcomes(vector_env, logged):
     loop = GameLoop(vector_env, agent)
     loop.run_train_iter(steps=5)
 
-    # The agent gets the observation after the final step for bootstrapping, not one it already acted on
-    assert len(agent.observations) == 5
-    assert np.array_equal(agent.update_states[0], loop.current_states)
+    # Each outcome carries the observations the next actions are chosen for
+    assert len(agent.observations) == 5 and not any(agent.greedy)
+    for outcome, next_observations in zip(agent.outcomes[:-1], agent.observations[1:], strict=True):
+        assert np.array_equal(outcome.observations, next_observations)
+    assert np.array_equal(agent.outcomes[-1].observations, loop.current_states)
 
     ended, truncated = agent.outcomes[2], agent.outcomes[4]
     assert ended.terminated.tolist() == [True, False] and ended.truncated.tolist() == [False, False]
     assert truncated.terminated.tolist() == [False, False] and truncated.truncated.tolist() == [False, True]
-    assert ended.final_states[0].shape == truncated.final_states[1].shape == vector_env.single_observation_space.shape
-    assert agent.outcomes[3].final_states is None
+    assert ended.final_observations is not None and truncated.final_observations is not None
+    assert (
+        ended.final_observations[0].shape
+        == truncated.final_observations[1].shape
+        == vector_env.single_observation_space.shape
+    )
+    assert agent.outcomes[3].final_observations is None
     assert ended.levels == ["1-1", "1-1"]
-    # 1-1 always starts small
-    assert ended.start_powerups == [Powerup.SMALL] * 2
-    assert ended.bonus is None
 
 
-def test_recent_mean_reward_window(vector_env, logged):
-    loop = GameLoop(vector_env, RecordingAgent(None, get_env_info(vector_env)), objective_window=1)
-    loop.run_train_iter(steps=5)
-    # Only the last episode (of worker 1, reward 5) counts
-    assert loop.recent_mean_reward == pytest.approx(5.0)
+def test_agent_learns_with_the_novelty_bonus(vector_env, logged):
+    agent = RecordingAgent(None, get_env_info(vector_env))
+    novelty = NoveltyBonus(ExplorationConfig(bonus_scale=1.0, cell_size=16))
+    loop = GameLoop(vector_env, agent, novelty_bonus=novelty)
+    loop.run_train_iter(steps=2)
+
+    # Both workers moved from x 0 to 10 and then to 20, into a new cell each step, with the same reward from the game:
+    # the first of them got the full bonus for it and the second the bonus of a second visit
+    rewards = np.array([outcome.rewards for outcome in agent.outcomes])
+    assert rewards[:, 0] - rewards[:, 1] == pytest.approx([1 - 1 / np.sqrt(2)] * 2)
+    # How rare each worker's place is, for the agent to replay rare experience more often
+    assert [outcome.rarity.tolist() for outcome in agent.outcomes] == [[1, 0.5], [1, 0.5]]
+    assert logged[0][0]["exploration/visited_cells"] == 2
+    assert logged[0][0]["exploration/novelty_bonus"] == pytest.approx((1 + 1 / np.sqrt(2)) / 2)
+
+    restored = NoveltyBonus(ExplorationConfig(bonus_scale=1.0, cell_size=16))
+    GameLoop(vector_env, agent, novelty_bonus=restored).load_state_dict(loop.state_dict())
+    assert restored.counts == novelty.counts
+
+
+def test_untried_actions_are_taken_before_a_wall(vector_env, logged):
+    agent = RecordingAgent(None, get_env_info(vector_env))
+    num_actions = agent.env_info.num_actions
+    untried = UntriedActions(cell_size=32, num_actions=num_actions, patience=1)
+    loop = GameLoop(vector_env, agent, untried_actions=untried)
+    loop.run_train_iter(steps=10)
+
+    # Both workers move 10 pixels per step. Worker 0's episodes end after 3 steps at distance 30, in the first cell,
+    # worker 1's after 5 steps at 50, in the second. Worker 0's second episode, ending after step 6, makes no progress,
+    # so 1-1 is stuck at the second cell: there, at 40 before step 10, worker 1 takes the actions it has not taken in
+    # its first episode
+    assert [episode.max_distance for episode in loop.iter_episodes[:2]] == [30, 50]
+    masks = [mask for mask in agent.untried if mask is not None]
+    assert len(masks) == 10 and not np.any(masks[:9]) and not masks[9][0].any()
+    assert masks[9][1].tolist() == [False] + [True] * (num_actions - 1)
+    metrics = logged[0][0]
+    assert metrics["exploration/untried_actions"] == 1 / 20
+    assert metrics["exploration/stuck_levels"] == 1 and metrics["exploration/window_1-1"] == 32
+
+    restored = UntriedActions(cell_size=32, num_actions=num_actions, patience=1)
+    GameLoop(vector_env, agent, untried_actions=restored).load_state_dict(loop.state_dict())
+    assert restored.tried == untried.tried and restored.walls == untried.walls
+
+    # Not when evaluating
+    GameLoop(vector_env, agent, greedy=True, untried_actions=untried).run_single_step()
+    assert agent.untried[-1] is None
 
 
 def test_without_finished_episodes(vector_env, logged):
     agent = RecordingAgent(None, get_env_info(vector_env))
-    loop = GameLoop(vector_env, agent)
+    loop = GameLoop(vector_env, agent, LevelScheduler(SingleLevelConfig()))
     loop.run_train_iter(steps=2)
-    assert agent.update_episode_rewards == [None]
-    assert loop.recent_mean_reward is None
-    assert logged[0][0]["episodes"] == 0
-    assert "recent_mean_reward" not in logged[0][0] and "episode_reward_mean" not in logged[0][0]
+    assert agent.updates == 1
+    assert "levels/success_1-1" not in logged[0][0] and logged[0][0]["levels/cleared"] == 0.0
 
 
-def test_novelty_bonus_reaches_agent_but_not_episode_metrics(vector_env, logged):
-    agent = RecordingAgent(None, get_env_info(vector_env))
-    loop = GameLoop(vector_env, agent, novelty_bonus=NoveltyBonus(ExplorationConfig(bonus_scale=0.5)))
-    loop.run_train_iter(steps=5)
-
-    # Rewards of 10 per step scaled by 0.1 and, separately, the bonus: in the first step both workers reach the same
-    # new cell, so the second one gets 0.5 / sqrt(2)
-    first = agent.outcomes[0]
-    assert first.rewards == pytest.approx([1.0, 1.0])
-    assert first.bonus == pytest.approx([0.5, 0.5 / np.sqrt(2)])
-    metrics, _ = logged[0]
-    assert metrics["episode_reward_mean"] == pytest.approx(4.0)
-    assert metrics["novelty_bonus_per_step"] > 0
-    assert metrics["visited_cells"] > 0
+def test_episodes_count_for_the_level_they_started_on(monkeypatch):
+    # The episode leaves 1-1 through a warp pipe into 1-2 at its second step
+    monkeypatch.setattr(environment, "BaseEnvironment", lambda config, **_: WarpingMarioEnv(True, rewards=[0.0] * 4))
+    vector_env = make_vector_env([get_environment(make_env_config(), SingleLevelConfig("1-1"))])
+    try:
+        scheduler = LevelScheduler(SingleLevelConfig("1-1"))
+        agent = RecordingAgent(None, get_env_info(vector_env))
+        loop = GameLoop(vector_env, agent, level_scheduler=scheduler)
+        loop.run_single_step()
+        loop.run_single_step()
+        assert [episode.level for episode in loop.iter_episodes] == ["1-1"]
+        assert agent.outcomes[-1].levels == ["1-1"]
+        assert scheduler.success_rate("1-1") == 0.0
+    finally:
+        vector_env.close()
 
 
 def test_curriculum_unlocks_levels_in_workers(monkeypatch, logged):
@@ -162,14 +210,13 @@ def test_curriculum_unlocks_levels_in_workers(monkeypatch, logged):
         loop.run_train_iter(steps=4)
         assert scheduler.num_unlocked == 2
         assert vector_env.get_attr("levels") == (["1-1", "1-2"], ["1-1", "1-2"])
-        assert logged[0][0]["success_rate_1-1"] == 1.0
-        assert logged[0][0]["flag_rate"] == 1.0
+        assert logged[0][0]["levels/success_1-1"] == 1.0
 
         # Workers already reset into their next episode before the unlock, the following ones are on the newest level
         loop.run_train_iter(steps=4)
         assert scheduler.num_unlocked == 3
         assert [e.level for e in loop.iter_episodes] == ["1-1", "1-1", "1-2", "1-2"]
-        assert [metrics["num_unlocked_levels"] for metrics, _ in logged] == [2, 3]
+        assert [metrics["levels/unlocked"] for metrics, _ in logged] == [2, 3]
     finally:
         vector_env.close()
 
@@ -181,8 +228,78 @@ def test_test_episode(monkeypatch):
     env = make_vector_env([get_environment(make_env_config(), SingleLevelConfig())])
     try:
         agent = RecordingAgent(None, get_env_info(env))
-        episode = GameLoop(env, agent).run_test_episode()
+        episode = GameLoop(env, agent, greedy=True).run_test_episode()
     finally:
         env.close()
     assert episode.flag_get and episode.x_pos == 30 and episode.level == "1-1"
-    assert len(agent.observations) == 3
+    assert len(agent.observations) == 3 and all(agent.greedy) and not agent.trained_after
+
+
+def test_restart_plays_the_new_distribution(monkeypatch):
+    monkeypatch.setattr(
+        environment, "BaseEnvironment", lambda config, level, **_: FakeMarioEnv([10.0] * 3, level=level, flag_get=True)
+    )
+    env = make_vector_env([get_environment(make_env_config(), SingleLevelConfig())])
+    try:
+        loop = GameLoop(env, RecordingAgent(None, get_env_info(env)), greedy=True)
+        env.call("set_level_distribution", ["1-3"], [1.0])
+        loop.restart()
+        assert loop.run_test_episode().level == "1-3"
+    finally:
+        env.close()
+
+
+def test_levels_are_played_in_order_until_the_first_without_the_flag(monkeypatch):
+    cleared = {"1-1", "1-2"}
+    monkeypatch.setattr(
+        environment,
+        "BaseEnvironment",
+        lambda config, level, **_: FakeMarioEnv([10.0] * 3, level=level, flag_get=level in cleared),
+    )
+    levels = ["1-1", "1-2", "1-3", "1-4"]
+    game = get_environment(make_env_config(), SingleLevelConfig())
+    # The fakes of all levels are created here, since the workers would create real ones
+    level_select = game.unwrapped
+    assert isinstance(level_select, LevelSelectEnv)
+    for level in levels:
+        level_select._get_env(level)
+    env = make_vector_env([game])
+    try:
+        loop = GameLoop(env, RecordingAgent(None, get_env_info(env)), greedy=True)
+        episodes = play_levels(loop, levels)
+    finally:
+        env.close()
+    assert [(e.level, e.flag_get) for e in episodes] == [("1-1", True), ("1-2", True), ("1-3", False)]
+
+
+class FireFlowerMarioEnv(FakeMarioEnv):
+    """Collects a fire flower on the way to the flag."""
+
+    def _info(self, **kwargs) -> dict:
+        return {**super()._info(**kwargs), "powerup_level": Powerup.FIRE if self.t >= 2 else self.powerup}
+
+
+def test_levels_keep_the_powerup_they_were_finished_with(monkeypatch):
+    def make(config, level, **_):
+        env_class = FireFlowerMarioEnv if level == "1-2" else FakeMarioEnv
+        return env_class([10.0] * 3, level=level, flag_get=True)
+
+    monkeypatch.setattr(environment, "BaseEnvironment", make)
+    levels = ["1-1", "1-2", "1-3"]
+    game = get_environment(make_env_config(), SingleLevelConfig())
+    level_select = game.unwrapped
+    assert isinstance(level_select, LevelSelectEnv)
+    for level in levels:
+        level_select._get_env(level)
+    env = make_vector_env([game])
+    try:
+        loop = GameLoop(env, RecordingAgent(None, get_env_info(env)), greedy=True)
+        episodes = play_levels(loop, levels)
+    finally:
+        env.close()
+    # Mario starts small, finds the flower in 1-2 and keeps it for 1-3
+    assert [(e.start_powerup, e.powerup) for e in episodes] == [
+        (Powerup.SMALL, Powerup.SMALL),
+        (Powerup.SMALL, Powerup.FIRE),
+        (Powerup.FIRE, Powerup.FIRE),
+    ]

@@ -1522,25 +1522,20 @@ wheels = [
 [[package]]
 name = "nes-py"
 version = "9.0.1"
-source = { registry = "https://pypi.org/simple" }
+source = { directory = "external/nes-py" }
 dependencies = [
     { name = "gymnasium" },
     { name = "numpy" },
     { name = "pyglet" },
     { name = "tqdm" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c0/77/d27858362aaaea8a371062515ba5c4ae0c48dc482797998485c998c70e8c/nes_py-9.0.1.tar.gz", hash = "sha256:f9aafc42a90600af39e844b6c0a153fdfc2b7635997cb70be345c22e58b4557b", size = 113156, upload-time = "2026-06-10T17:06:22.883Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/15/4b/f58ce386f120faa369e7f8615d45024ec55f707948822520af0f630e9fca/nes_py-9.0.1-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:d61747fd93abfd31eaeb1d4a52bc1385223471e67b016fa06d6e8ee61b1d3523", size = 143528, upload-time = "2026-06-10T17:06:10.436Z" },
-    { url = "https://files.pythonhosted.org/packages/ff/b9/883da012016194fe02fc3ac28466c84c40bac77024cd3c8a3d6df88e956c/nes_py-9.0.1-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:b15f5d8e7b51916fbfc17994c5f9e139815a169317146365aeee0e0dbb70e153", size = 136545, upload-time = "2026-06-10T17:06:11.979Z" },
-    { url = "https://files.pythonhosted.org/packages/79/1d/84be8057c12cdaa60278363f85aeef35c9a0b82b929aacf151b508dbfdbd/nes_py-9.0.1-cp313-cp313-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:d53f3ca69d54a44bc0fbe028a521e06feb4d2a0e09bcb5630e2cf78bc5556bb3", size = 149305, upload-time = "2026-06-10T17:06:13.115Z" },
-    { url = "https://files.pythonhosted.org/packages/17/cc/9e62cccdadeb6e27aa00ffec04c4875268f89d2bba2a3c1e390f31ce774f/nes_py-9.0.1-cp313-cp313-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:628698766186e880498994dfc52bf329e8f6fb49b60916050e01710bed036f9e", size = 158044, upload-time = "2026-06-10T17:06:14.318Z" },
-    { url = "https://files.pythonhosted.org/packages/78/df/360f26e13c9787c601162e7c18b8d7d1f84c24989e6a814b4f058976b6eb/nes_py-9.0.1-cp313-cp313-win_amd64.whl", hash = "sha256:2ad6a8e3e57e2af343292b636fcc866fa4887efd14a8de3543045f5f72ef08b6", size = 137685, upload-time = "2026-06-10T17:06:15.712Z" },
-    { url = "https://files.pythonhosted.org/packages/65/c5/cbf579c39dc18b91608eb6bd71173b47b65d1b02e311356eed80f7aa9613/nes_py-9.0.1-cp314-cp314-macosx_10_15_x86_64.whl", hash = "sha256:0934d1b8711e7db1f00772590a2b072eb831907ad932e34ffab4c3afd73de5d7", size = 143937, upload-time = "2026-06-10T17:06:16.833Z" },
-    { url = "https://files.pythonhosted.org/packages/56/fb/47cc4ee81c3ea6c9eb7aa031bb3e09820d03a610655c1bdc355986a49ccc/nes_py-9.0.1-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:ecb5827e9b664686f7b2046d5d1878d75553f70076a186df468bdea8b5e2aad6", size = 137026, upload-time = "2026-06-10T17:06:18.065Z" },
-    { url = "https://files.pythonhosted.org/packages/41/e8/cd22a06a8264cc6e49d4ccb6080bac9e38cb3bee7fd89a5e1850b26efd23/nes_py-9.0.1-cp314-cp314-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:65c343f13529ecaa5927d156af6eaa4d06aa4f7aa13e618be342beb87f618157", size = 150640, upload-time = "2026-06-10T17:06:19.352Z" },
-    { url = "https://files.pythonhosted.org/packages/a7/2c/d6f602b33c3e07dd61a1c01f671b53d1cd39d2e93c54df667a458406f307/nes_py-9.0.1-cp314-cp314-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:20e414ef7300990d2204b1e0fe439fcd1b0a70f5ea18d783db78e23f2cfc3ea5", size = 158505, upload-time = "2026-06-10T17:06:20.672Z" },
-    { url = "https://files.pythonhosted.org/packages/18/23/b60ab177979fc09c94151ca438f815a8e284b6b5a11fcc8bc34a87286d76/nes_py-9.0.1-cp314-cp314-win_amd64.whl", hash = "sha256:f97ff88d504a4a53e40a3a20ff6642367ebb7b9aac3ea397130e80bc425521e0", size = 141646, upload-time = "2026-06-10T17:06:21.802Z" },
+
+[package.metadata]
+requires-dist = [
+    { name = "gymnasium", specifier = ">=1.0.0" },
+    { name = "numpy", specifier = ">=1.18.5" },
+    { name = "pyglet", specifier = ">=1.4.0,<=1.5.21" },
+    { name = "tqdm", specifier = ">=4.48.2" },
 ]
 
 [[package]]
@@ -1562,7 +1557,9 @@ dependencies = [
     { name = "gymnasium" },
     { name = "hydra-core" },
     { name = "jaxtyping" },
+    { name = "matplotlib" },
     { name = "mlflow" },
+    { name = "nes-py" },
     { name = "numpy" },
     { name = "omegaconf" },
     { name = "opencv-python" },
@@ -1587,7 +1584,9 @@ requires-dist = [
     { name = "gymnasium", specifier = ">=1.3.0" },
     { name = "hydra-core", specifier = ">=1.3.7" },
     { name = "jaxtyping", specifier = ">=0.3.11" },
+    { name = "matplotlib", specifier = ">=3.11.2" },
     { name = "mlflow", specifier = ">=3.16.1" },
+    { name = "nes-py", directory = "external/nes-py" },
     { name = "numpy", specifier = ">=2.5.3" },
     { name = "omegaconf", specifier = ">=2.3.1" },
     { name = "opencv-python", specifier = ">=5.0.0.93" },

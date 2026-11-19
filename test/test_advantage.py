@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from agents.advantage import GaeEstimator
+from agents.ppo.advantage import GaeEstimator
 
 
 def test_output_shapes():

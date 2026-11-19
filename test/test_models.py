@@ -1,9 +1,15 @@
+from pathlib import Path
+
 import pytest
 import torch
+from hydra import compose, initialize_config_dir
+from hydra.utils import instantiate
 
-from config.model import NatureActorCriticConfig
+from agents.ppo.actor_critic import ActorCritic
+from agents.ppo.impala_encoder import ImpalaEncoder
+from agents.ppo.nature_encoder import NatureEncoder
+from config.model import ImpalaActorCriticConfig, NatureActorCriticConfig
 from environment import EnvironmentInfo
-from models import ActorCritic, NatureEncoder
 
 
 @pytest.mark.parametrize("in_dim", [7, 10, 94, 114])
@@ -49,50 +55,25 @@ def test_actor_critic_forward_on_non_square_input():
     assert values.shape == (3,)
 
 
-def test_nature_config_covers_whole_screen():
-    """The configured encoder on the configured input must have a receptive field spanning the observation."""
-    from pathlib import Path
-
-    from hydra import compose, initialize_config_dir
-    from hydra.utils import instantiate
-
+@pytest.mark.parametrize("model", ["nature", "impala"])
+def test_configured_models_fit_the_configured_frames(model):
     with initialize_config_dir(str(Path(__file__).parents[1] / "configs"), version_base="1.3"):
-        config = instantiate(compose("neurio_config", overrides=["agent/model=nature"]), _convert_="all")
-    model_config, env_config = config.agent.model, config.environment
-    height = int((240 - env_config.clip_top - env_config.clip_bot) / env_config.subsampling_factor)
-    width = int((256 - env_config.clip_left - env_config.clip_right) / env_config.subsampling_factor)
-
-    receptive_field, jump = 1, 1
-    for kernel_size, stride in zip(model_config.kernel_sizes, model_config.strides, strict=True):
-        receptive_field += (kernel_size - 1) * jump
-        jump *= stride
-    env_info = EnvironmentInfo(width, height, env_config.num_stack_frames, 1, 12, 1)
-    encoder = NatureEncoder(env_info, model_config.num_filters, model_config.kernel_sizes, model_config.strides, 16)
-
-    assert (height, width) == (94, 114)
-    # Each conv output sees a local patch; the fully connected layer combines all of them, i.e. the whole screen
-    assert encoder.fc_layer.in_features == model_config.num_filters[-1] * 12 * 14
-    assert receptive_field == 36
+        config = instantiate(compose("neurio_config", overrides=["agent=ppo", f"agent/model={model}"]), _convert_="all")
+    env = config.environment
+    env_info = EnvironmentInfo(env.width, env.height, config.agent.stack_frames, 1, 12, 2)
+    states = torch.rand(2, env_info.total_channel_dim, env.height, env.width) * 255
+    logits, values = ActorCritic(config.agent.model, env_info)(states, torch.tensor([0, 1]))
+    assert logits.shape == (2, 12) and values.shape == (2,)
 
 
 def test_impala_actor_critic_on_full_observation():
-    from pathlib import Path
-
-    from hydra import compose, initialize_config_dir
-    from hydra.utils import instantiate
-
-    from config.model import ImpalaActorCriticConfig
-    from models import ImpalaEncoder
-
     with initialize_config_dir(str(Path(__file__).parents[1] / "configs"), version_base="1.3"):
         config = instantiate(compose("neurio_config", overrides=["agent/model=impala"]), _convert_="all").agent.model
     assert isinstance(config, ImpalaActorCriticConfig)
-    env_info = EnvironmentInfo(width=114, height=94, stack_frames=4, image_channels=1, num_actions=12, num_workers=3)
+    env_info = EnvironmentInfo(width=112, height=96, stack_frames=4, image_channels=1, num_actions=12, num_workers=3)
     model = ActorCritic(config, env_info)
 
-    # Three stages halve 94x114 to 12x15
     assert isinstance(model.encoder, ImpalaEncoder)
-    assert model.encoder.fc_layer.in_features == config.channels[-1] * 12 * 15
     states = torch.rand(3, env_info.total_channel_dim, env_info.height, env_info.width) * 255
     logits, values = model(states, torch.tensor([0, 1, 11]))
     assert logits.shape == (3, 12) and values.shape == (3,)

@@ -2,8 +2,7 @@ import numpy as np
 import pytest
 import torch
 
-from agents.self_imitation import SelfImitationMemory
-from environment import Powerup
+from agents.ppo.self_imitation import SelfImitationMemory
 from test_ppo_agent import ENV_INFO, _make_agent, _outcome, _random_states
 
 STATE_SHAPE = (ENV_INFO.total_channel_dim, ENV_INFO.height, ENV_INFO.width)
@@ -18,7 +17,7 @@ def _play(memory: SelfImitationMemory, rewards_per_step, dones_per_step, levels,
             torch.zeros(workers, dtype=torch.int64),
             torch.full((workers,), actions, dtype=torch.int64),
         )
-        memory.record_rewards(torch.tensor(rewards, dtype=torch.float32), dones, levels)
+        memory.record_rewards(torch.tensor(rewards, dtype=torch.float32), list(rewards), dones, levels)
 
 
 def test_episode_returns_and_storage():
@@ -26,33 +25,32 @@ def test_episode_returns_and_storage():
     # Worker 0 finishes an episode of 3 steps, worker 1 is still playing
     _play(memory, [[1.0, 5.0], [2.0, 5.0], [4.0, 5.0]], [[False, False], [False, False], [True, False]], ["1-3", "1-3"])
 
-    (episode,) = memory.episodes["1-3 small"]
+    (episode,) = memory.episodes["1-3"]
     assert episode.total_reward == 7.0
     assert episode.returns.tolist() == pytest.approx([1 + 0.5 * 2 + 0.25 * 4, 2 + 0.5 * 4, 4.0])
     # Frames of the first state and the newest frame of each following state
     assert episode.frames.dtype == torch.uint8 and len(episode.frames) == STACK + 2
-    assert memory.get_metrics()["sil_stored_episodes"] == 1
 
 
 def test_keeps_best_episodes_per_level():
     memory = SelfImitationMemory(num_workers=1, gamma=0.9, episodes_per_level=2, stack_frames=STACK)
     for total, level in [(1.0, "1-3"), (3.0, "1-3"), (2.0, "1-3"), (0.5, "1-3"), (0.1, "4-4")]:
         _play(memory, [[total]], [[True]], [level])
-    assert sorted(e.total_reward for e in memory.episodes["1-3 small"]) == [2.0, 3.0]
+    assert sorted(e.total_reward for e in memory.episodes["1-3"]) == [2.0, 3.0]
     # Another level has its own store, even with a much lower reward
-    assert [e.total_reward for e in memory.episodes["4-4 small"]] == [pytest.approx(0.1)]
+    assert [e.total_reward for e in memory.episodes["4-4"]] == [pytest.approx(0.1)]
 
 
-def test_keeps_best_episodes_per_start_powerup():
-    memory = SelfImitationMemory(num_workers=1, gamma=0.9, episodes_per_level=1, stack_frames=STACK)
-    for total, powerup in [(1.0, Powerup.SMALL), (5.0, Powerup.FIRE), (2.0, Powerup.SMALL)]:
+def test_episodes_are_ranked_by_the_game_reward():
+    memory = SelfImitationMemory(num_workers=1, gamma=0.5, episodes_per_level=1, stack_frames=STACK)
+    for reward, game_reward in [(5.0, 1.0), (-3.0, 2.0)]:
         memory.record_actions(
             torch.zeros(1, *STATE_SHAPE), torch.zeros(1, dtype=torch.int64), torch.ones(1, dtype=torch.int64)
         )
-        memory.record_rewards(torch.tensor([total]), [True], ["1-2"], [powerup])
-    # Fire Mario does better, but does not replace the episodes of small Mario
-    assert [e.total_reward for e in memory.episodes["1-2 small"]] == [2.0]
-    assert [e.total_reward for e in memory.episodes["1-2 fire"]] == [5.0]
+        memory.record_rewards(torch.tensor([reward]), [game_reward], [True], ["1-1"])
+    # The episode that got further in the game is kept, with the returns of the reward the agent learns from
+    (episode,) = memory.episodes["1-1"]
+    assert episode.total_reward == 2.0 and episode.returns.tolist() == [-3.0]
 
 
 def test_sampling():
@@ -88,7 +86,7 @@ def test_sampled_states_match_recorded_states():
         state = values[:, None, None].expand(STATE_SHAPE).unsqueeze(0)
         recorded.append(state[0].to(torch.uint8))
         memory.record_actions(state, torch.zeros(1, dtype=torch.int64), torch.tensor([t]))
-        memory.record_rewards(torch.tensor([1.0]), [t == 5], ["1-1"])
+        memory.record_rewards(torch.tensor([1.0]), [1.0], [t == 5], ["1-1"])
 
     states, _prev_actions, actions, _returns = memory.sample(64)
     for state, action in zip(states, actions.tolist(), strict=True):
@@ -103,13 +101,9 @@ def sil_agent(monkeypatch):
 def test_agent_records_its_episodes(sil_agent):
     rng = np.random.default_rng(12)
     for t in range(3):
-        sil_agent.feed_observation(_random_states(rng))
-        sil_agent.next_actions()
-        sil_agent.give_reward(
-            _outcome([1.0, 2.0], [t == 2, False], [False, False], bonus=[9.0, 9.0], levels=["1-3"] * 2)
-        )
-    (episode,) = sil_agent.self_imitation.episodes["1-3 small"]
-    # The game's reward only, without the bonus
+        sil_agent.act(_random_states(rng))
+        sil_agent.observe(_outcome([1.0, 2.0], [t == 2, False], [False, False], levels=["1-3"] * 2))
+    (episode,) = sil_agent.self_imitation.episodes["1-3"]
     assert episode.total_reward == 3.0
     assert len(episode.actions) == 3
 
@@ -126,23 +120,21 @@ def test_update_imitates_episodes_better_than_expected(sil_agent):
 
     def store(action, reward):
         memory.record_actions(state, torch.zeros(1, dtype=torch.int64), torch.tensor([action]))
-        memory.record_rewards(torch.tensor([reward]), [True], ["1-3"])
+        memory.record_rewards(torch.tensor([reward]), [reward], [True], ["1-3"])
 
     # A return far above the value estimate is imitated
     store(action=2, reward=100.0)
     before = log_prob(2)
-    metrics = sil_agent._self_imitation_update()
+    sil_agent._self_imitation_update()
     assert log_prob(2) > before + 0.5
-    assert metrics["sil_positive_share"] == 1.0
 
     # A return far below the value estimate is ignored
     memory.episodes.clear()
     memory._stored = None
     store(action=1, reward=-100.0)
     before = log_prob(1)
-    metrics = sil_agent._self_imitation_update()
+    sil_agent._self_imitation_update()
     assert log_prob(1) == pytest.approx(before, abs=1e-6)
-    assert metrics["sil_positive_share"] == 0.0
 
 
 def test_disabled_with_zero_weight(monkeypatch):

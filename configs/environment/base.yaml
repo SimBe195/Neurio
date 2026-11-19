@@ -3,21 +3,27 @@ _target_: config.environment.EnvironmentConfig
 env_name: SuperMarioBros-v0
 complex_movement: True
 num_repeat_frames: 4
-num_stack_frames: 4
-clip_top: 0
-clip_bot: 0
+# As in DreamerV3 and the Atari benchmark (Machado et al., 2018), so that the agent cannot rely on exact timing
+sticky_action_probability: 0.25
+grayscale: True
+remove_background: True
+# Cuts off the status bar at the top and part of the ground. The full width stays: with 32 pixels cut on either side,
+# the agent jumped onto 5-3's high treetops without seeing the Goombas on them, which were still right of its view.
+# The remaining 256 x 192 pixels are resized to a quarter, divisible by 16 as DreamerV3's encoder needs.
+clip_top: 33
+clip_bot: 15
 clip_left: 0
 clip_right: 0
-subsampling_factor: 1
-grayscale: True
-# Scale of the game's reward, which is mostly 0-5 per frame for progress and -25 for dying
+height: 48
+width: 64
+# Scale of all rewards, which are given in the game's units: it pays about 1 per pixel of progress and -25 for dying
 reward_scale: 0.1
-# Instead of the game's 50, which is worth only 50 pixels of progress: dead ends further to the right, like the warp
-# zone of 1-2, would otherwise pay more than finishing the level
+# Progress is worth a quarter of the game's and dying twice as much, so that running into a pit is not worth the
+# distance gained while falling (see environment.ProgressShaping). Dying at 100 made the agent learn levels at half
+# the pace.
 flag_reward: 500
-# Probabilities of starting a level other than 1-1 small, big or with the fire flower, since in the full game Mario
-# carries power-ups over from the previous level. Mostly small, since the agent rarely collects power-ups.
-start_powerup_probs: [0.7, 0.15, 0.15]
+death_penalty: 50
+progress_reward: 0.25
 # About 10 seconds of play without getting further to the right, e.g. at a wall or in front of an enemy the agent does
 # not dare to pass, which would otherwise last until the time runs out
 max_steps_without_progress: 150

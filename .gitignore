@@ -4,7 +4,7 @@ __pycache__/
 .idea
 .hypothesis/
 outputs/
-mlruns/
+mlruns
 mlflow.db
 multirun/
 optuna_studies/
@@ -14,3 +14,5 @@ recordings/
 overnight/
 *.log
 .coverage
+previews/
+plots/

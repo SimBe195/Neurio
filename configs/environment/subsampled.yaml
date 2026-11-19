@@ -1,4 +1,0 @@
-defaults:
-  - clipped
-  - _self_
-subsampling_factor: 2

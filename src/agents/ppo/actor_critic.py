@@ -3,15 +3,19 @@ import torch.nn as nn
 from jaxtyping import Float, Int64
 
 from config.model import ImpalaActorCriticConfig, NatureActorCriticConfig
+from environment import EnvironmentInfo
 
 from .impala_encoder import ImpalaEncoder, ResidualBlock
-from .model import Model
 from .nature_encoder import NatureEncoder
 
 
-class ActorCritic(Model):
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
+class ActorCritic(nn.Module):
+    """Action logits and state value from the stacked frames and the previous action."""
+
+    def __init__(self, config: NatureActorCriticConfig | ImpalaActorCriticConfig, env_info: EnvironmentInfo) -> None:
+        super().__init__()
+        self.config = config
+        self.env_info = env_info
         self.encoder: NatureEncoder | ImpalaEncoder
         if isinstance(self.config, NatureActorCriticConfig):
             self.encoder = NatureEncoder(

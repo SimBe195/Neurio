@@ -1,5 +1,4 @@
 import logging
-import math
 import tempfile
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -14,14 +13,18 @@ from tqdm import tqdm
 from agents import Agent, get_agent
 from config import NeurioConfig, flatten
 from environment import get_env_info, get_multiprocess_environment
+from exploration import NoveltyBonus, UntriedActions
 from game_loop import GameLoop
-from level_schedulers import CurriculumLevelScheduler, get_level_scheduler
-from novelty import NoveltyBonus
+from level_schedulers import get_level_scheduler
+from powerups import StartPowerups
 from resume import (
+    BEST_CHECKPOINT_ITER_TAG,
+    BEST_SCORE_TAG,
     CONFIG_HASH_TAG,
     config_hash,
     decide_resume,
-    find_resumable_run,
+    discard_after,
+    find_previous_run,
     load_training_state,
     save_training_state,
 )
@@ -34,7 +37,7 @@ CONFIG_ARTIFACT = "config.yaml"
 
 # Called after each iteration with the iteration (starting at 1) and the current objective. Returning True stops
 # training early, e.g. to prune a hyperparameter search trial.
-IterationCallback = Callable[[int, float | None], bool]
+IterationCallback = Callable[[int, float], bool]
 
 
 @dataclass
@@ -59,8 +62,7 @@ class Checkpoints:
         self.best_score: float | None = None
         self.best_iter = -min_iters
 
-    def after_iteration(self, train_iter: int, score: float | None, last: bool) -> bool:
-        """:return: Whether a checkpoint was saved"""
+    def after_iteration(self, train_iter: int, score: float | None, last: bool) -> None:
         improved = (
             score is not None
             and (self.best_score is None or score >= self.best_score + self.min_improvement)
@@ -68,11 +70,13 @@ class Checkpoints:
         )
         if improved:
             self.best_score, self.best_iter = score, train_iter
-            mlflow.set_tags({"best_checkpoint_iter": str(train_iter), "best_score": f"{score:.3f}"})
+            self.tag_best()
         if improved or last or train_iter % self.save_frequency == 0:
             self.agent.save(train_iter)
-            return True
-        return False
+
+    def tag_best(self) -> None:
+        if self.best_score is not None:
+            mlflow.set_tags({BEST_CHECKPOINT_ITER_TAG: str(self.best_iter), BEST_SCORE_TAG: f"{self.best_score:.3f}"})
 
     def state_dict(self) -> dict:
         return {"best_score": self.best_score, "best_iter": self.best_iter}
@@ -91,9 +95,6 @@ def load_run_config(run_id: str) -> DictConfig:
         path = mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path=CONFIG_ARTIFACT, dst_path=directory)
         cfg = OmegaConf.load(path)
     assert isinstance(cfg, DictConfig)
-    # Older runs decayed the entropy weight over all of training
-    if "total_updates" in cfg.agent:
-        cfg.agent.entropy_decay_updates = cfg.agent.pop("total_updates")
     return cfg
 
 
@@ -106,13 +107,11 @@ def setup_mlflow(config: NeurioConfig) -> str:
     return mlflow.create_experiment(name)
 
 
-def current_objective(config: NeurioConfig, loop: GameLoop) -> float | None:
-    """The configured objective, None while it is not available yet."""
-    if config.objective == "recent_mean_reward":
-        return loop.recent_mean_reward
+def current_objective(config: NeurioConfig, loop: GameLoop) -> float:
+    """The configured objective."""
     scheduler = loop.level_scheduler
-    assert isinstance(scheduler, CurriculumLevelScheduler), f"{config.objective} needs a level curriculum"
-    return scheduler.score() if config.objective == "levels_cleared_score" else scheduler.mean_score()
+    assert scheduler is not None
+    return scheduler.score() if config.objective == "cleared" else scheduler.mean_score()
 
 
 def train(
@@ -152,19 +151,41 @@ def train(
             )
 
         render_mode = "human" if config.render else None
-        env = get_multiprocess_environment(config.num_workers, config.environment, config.levels, render_mode)
+        env = get_multiprocess_environment(
+            config.num_workers,
+            config.environment,
+            config.levels,
+            config.agent.stack_frames,
+            render_mode,
+        )
         try:
-            agent = get_agent(config.agent, get_env_info(env))
+            env_info = get_env_info(env)
+            agent = get_agent(config.agent, env_info)
             if (description := agent.describe()) is not None:
                 mlflow.log_text(description, "model_summary.txt")
-            novelty_bonus = NoveltyBonus(config.exploration) if config.exploration.bonus_scale > 0 else None
-            loop = GameLoop(env, agent, get_level_scheduler(config.levels), config.objective_window, novelty_bonus)
+            exploration = config.exploration
+            loop = GameLoop(
+                env,
+                agent,
+                get_level_scheduler(config.levels),
+                novelty_bonus=NoveltyBonus(exploration) if exploration.bonus_scale > 0 else None,
+                # Counted between the saves of the training state, so that each period is saved complete
+                start_powerups=StartPowerups(config.resume_frequency),
+                untried_actions=(
+                    UntriedActions(exploration.cell_size, env_info.num_actions, config.levels.success_window)
+                    if exploration.try_all_actions and agent.takes_untried_actions
+                    else None
+                ),
+            )
             checkpoints = Checkpoints(agent, config.save_frequency)
             first_iter = 1
             if resume_run_id is not None:
                 last_iter, state = load_training_state(resume_run_id)
                 loop.load_state_dict(state["loop"])
                 checkpoints.load_state_dict(state["checkpoints"])
+                # Training may have gone on after the state was saved, which the resumed run repeats
+                discard_after(resume_run_id, last_iter)
+                checkpoints.tag_best()
                 first_iter = last_iter + 1
                 mlflow.set_tag("resumed_after_iter", str(last_iter))
 
@@ -176,7 +197,8 @@ def train(
                 stopped_early = on_iteration is not None and on_iteration(train_iter, current_objective(config, loop))
                 last = stopped_early or train_iter == config.num_iters
                 score = loop.level_scheduler.score() if loop.level_scheduler is not None else None
-                if checkpoints.after_iteration(train_iter, score, last):
+                checkpoints.after_iteration(train_iter, score, last)
+                if last or train_iter % config.resume_frequency == 0:
                     save_training_state(
                         train_iter, {"loop": loop.state_dict(), "checkpoints": checkpoints.state_dict()}
                     )
@@ -187,15 +209,14 @@ def train(
         finally:
             env.close()
 
-    objective = current_objective(config, loop)
-    return TrainResult(math.nan if objective is None else objective, run.info.run_id, stopped_early)
+    return TrainResult(current_objective(config, loop), run.info.run_id, stopped_early)
 
 
 @hydra.main(version_base="1.3", config_path="../configs", config_name="neurio_config")
 def main(cfg: DictConfig) -> float:
     config: NeurioConfig = instantiate(cfg, _convert_="all")
-    interrupted = find_resumable_run(setup_mlflow(config), config_hash(cfg), config.num_iters)
-    resume_run_id = decide_resume(interrupted, config.resume)
+    previous = find_previous_run(setup_mlflow(config), config_hash(cfg), config.num_iters)
+    resume_run_id = decide_resume(previous, config.resume)
     return train(cfg, overrides=list(HydraConfig.get().overrides.task), resume_run_id=resume_run_id).objective
 
 

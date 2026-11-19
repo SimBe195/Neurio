@@ -1,0 +1,78 @@
+# DreamerV3 (Hafner et al., 2023) with the paper's settings. The network sizes are those of its 12M parameter model;
+# its larger ones scale deter, hidden, classes, depth and units together, e.g. 25M: agent.deter=3072 agent.hidden=384
+# agent.classes=24 agent.depth=24 agent.units=384
+_target_: config.agent.DreamerAgentConfig
+
+# Recurrent state: its size, its number of independent blocks and the hidden size of the layers around it
+deter: 2048
+blocks: 8
+hidden: 256
+# Stochastic state: this many categorical variables of this many classes
+stoch: 32
+classes: 16
+# Encoder and decoder: channels of each stage as multiples of depth, each stage halving the resolution
+depth: 16
+mults: [2, 3, 4, 4]
+kernel: 5
+decoder_blocks: 8
+# Hidden layers of the actor and critic, and of the reward and continuation heads
+units: 256
+actor_critic_layers: 3
+head_layers: 1
+# Rewards and values as distributions over this many bins, spaced exponentially
+bins: 255
+# Share of the uniform distribution mixed into the latent and the policy, so that nothing becomes impossible
+unimix: 0.01
+# The world model's KL losses count only above this many nats
+free_nats: 1.0
+loss_scales:
+  reconstruction: 1.0
+  reward: 1.0
+  continuation: 1.0
+  dynamics: 1.0
+  representation: 0.1
+  policy: 1.0
+  value: 1.0
+  replay_value: 0.3
+  self_imitation: 1.0
+  disagreement: 1.0
+  exploration_value: 1.0
+  # Muesli's CMPO regularizer of the actor towards the actions that one imagined step shows to be better
+  cmpo: 1.0
+# Training: sequences of batch_length steps from a replay of the last replay_size steps (about 10 GB at the default
+# frame size), with as many updates that each step is replayed train_ratio times on average
+batch_size: 16
+batch_length: 64
+train_ratio: 32
+replay_size: 1000000
+learning_rate: 4.0e-5
+# Adaptive gradient clipping: no update changes a parameter by more than this fraction of its norm
+agc: 0.3
+warmup: 1000
+# Imagination: rollouts of this many steps from every replayed state, with returns over about horizon steps
+imagination_length: 15
+horizon: 333
+lam: 0.95
+entropy_weight: 3.0e-4
+# Label smoothing of the CMPO target: it keeps a floor under the probability of actions the actor considers useless,
+# from which CMPO can raise one once it turns out better, e.g. pressing down on 8-4's pipe. 3e-4 also spread 10-20% of
+# the probability in about a tenth of the states over actions of about equal value, and the entropy doubled.
+cmpo_label_smoothing: 3.0e-5
+# Keeps the critic close to its slowly updated copy, which follows it at this rate
+slow_regularization: 1.0
+slow_critic_rate: 0.02
+# Advantages are divided by the range between these percentiles of the returns, but never scaled up
+return_percentiles: [5.0, 95.0]
+return_norm_rate: 0.01
+# Half of the replayed sequences are sampled around steps picked by how rarely the agent has been there (1 / visits of
+# the place, see exploration.NoveltyBonus), so that the few times it gets somewhere new, e.g. through 4-4's hole into
+# the bottom corridor, are replayed often enough for the world model and the actor to learn from them
+rare_fraction: 0.5
+# Self-imitation: an eighth of each batch comes from the agent's best episodes, so that the world model learns rare
+# successes, e.g. a difficult jump, and the actor imitates them where they beat the critic's expectation
+sil_fraction: 0.125
+sil_episodes_per_level: 8
+# Plan2Explore (Sekar et al., 2020): the actor also seeks what the ensemble's predictions disagree on, i.e. what the
+# world model has not learned yet
+exploration_heads: 8
+exploration_weight: 0.1

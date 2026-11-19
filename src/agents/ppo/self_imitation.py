@@ -6,8 +6,6 @@ from dataclasses import dataclass
 import torch
 from jaxtyping import Float, Int64, UInt8
 
-from environment import Powerup
-
 
 @dataclass
 class Episode:
@@ -16,16 +14,16 @@ class Episode:
     prev_actions: Int64[torch.Tensor, " time"]
     actions: Int64[torch.Tensor, " time"]
     returns: Float[torch.Tensor, " time"]
+    # The game's reward of the whole episode, by which it is ranked
     total_reward: float
 
 
 class SelfImitationMemory:
     """
     Memory of the agent's own best episodes for self-imitation learning (Oh et al., 2018): it records the episode of
-    each worker and keeps the `episodes_per_level` episodes with the highest game reward of every level and start
-    power-up, with the discounted return of each step. Levels are kept apart since their rewards are not comparable,
-    start power-ups since the episodes of the strongest one would take all places, and the agent would only learn to
-    imitate them.
+    each worker and keeps the `episodes_per_level` episodes with the highest game reward of every level, with the
+    discounted return of each step of the reward the agent learns from. Levels are kept apart since their rewards are
+    not comparable.
 
     Episodes are kept in CPU memory. States are stacks of the last `stack_frames` frames, so consecutive states share
     all but one frame, and each frame is stored only once.
@@ -36,14 +34,14 @@ class SelfImitationMemory:
         self.episodes_per_level = episodes_per_level
         self.stack_frames = stack_frames
         self._trajectories: list[dict[str, list]] = [self._empty_trajectory() for _ in range(num_workers)]
-        # Keyed by level and start power-up, e.g. "1-2 fire"
+        # Keyed by level
         self.episodes: dict[str, list[Episode]] = {}
         self._stored: list[Episode] | None = None
         self._cumulative_lengths: list[int] = []
 
     @staticmethod
     def _empty_trajectory() -> dict[str, list]:
-        return {"frames": [], "prev_actions": [], "actions": [], "rewards": []}
+        return {"frames": [], "prev_actions": [], "actions": [], "rewards": [], "game_rewards": []}
 
     def record_actions(
         self,
@@ -66,27 +64,27 @@ class SelfImitationMemory:
     def record_rewards(
         self,
         rewards: Float[torch.Tensor, " worker"],
+        game_rewards: list[float],
         dones: list[bool],
         levels: list[str],
-        start_powerups: list[int] | None = None,
     ) -> None:
         """
-        :param rewards: The game's reward of the last actions, without exploration bonus
+        :param rewards: The reward the agent learns from of the last actions
+        :param game_rewards: The game's reward of the last actions, by which episodes are ranked
         :param dones: Whether the episode of each worker ended with the last actions
         :param levels: Level of each worker, for finished episodes the level they ended on
-        :param start_powerups: Power-up each worker's episode started with, None if all start small
         """
         for worker, (trajectory, reward) in enumerate(zip(self._trajectories, rewards.tolist(), strict=True)):
             trajectory["rewards"].append(reward)
+            trajectory["game_rewards"].append(game_rewards[worker])
             if dones[worker]:
-                powerup = Powerup(start_powerups[worker] if start_powerups is not None else Powerup.SMALL)
-                self._store(trajectory, f"{levels[worker]} {powerup.name.lower()}")
+                self._store(trajectory, levels[worker])
                 self._trajectories[worker] = self._empty_trajectory()
 
     def _store(self, trajectory: dict[str, list], key: str) -> None:
         if not trajectory["actions"] or len(trajectory["actions"]) != len(trajectory["rewards"]):
             return
-        total_reward = sum(trajectory["rewards"])
+        total_reward = sum(trajectory["game_rewards"])
         episodes = self.episodes.setdefault(key, [])
         if len(episodes) >= self.episodes_per_level:
             worst = min(range(len(episodes)), key=lambda i: episodes[i].total_reward)
@@ -148,14 +146,3 @@ class SelfImitationMemory:
     def load_state_dict(self, state: dict) -> None:
         self.episodes = {key: [Episode(**episode) for episode in episodes] for key, episodes in state.items()}
         self._stored = None
-
-    def get_metrics(self) -> dict[str, float]:
-        stored = [episode for episodes in self.episodes.values() for episode in episodes]
-        if not stored:
-            return {"sil_stored_episodes": 0.0}
-        return {
-            "sil_stored_episodes": float(len(stored)),
-            "sil_stored_steps": float(sum(len(episode.actions) for episode in stored)),
-            "sil_best_episode_reward": max(episode.total_reward for episode in stored),
-            "sil_worst_stored_reward": min(episode.total_reward for episode in stored),
-        }
