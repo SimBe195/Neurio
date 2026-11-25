@@ -27,8 +27,6 @@ class LevelScheduler:
         self.results: dict[str, deque[LevelResult]] = {
             level: deque(maxlen=config.success_window) for level in config.evaluation_levels()
         }
-        self._score_sum = 0.0
-        self._num_updates = 0
 
     @property
     def active_levels(self) -> list[str]:
@@ -49,24 +47,18 @@ class LevelScheduler:
 
     def update(self) -> bool:
         """Called after each training iteration. Returns whether the distribution changed."""
-        self._score_sum += self.score()
-        self._num_updates += 1
         return False
 
     def score(self) -> float:
         """Sum of the recent success rates over all levels, i.e. the expected number of levels cleared."""
         return sum(self.success_rate(level) or 0.0 for level in self.results)
 
-    def mean_score(self) -> float:
-        """Mean score over all updates so far, which rewards learning fast and steadily."""
-        return self._score_sum / self._num_updates if self._num_updates else 0.0
-
     def get_metrics(self) -> dict[str, float]:
         """
-        The expected number of levels cleared, its mean so far, and for each active level the success rate and the
-        mean distance its recent episodes got, see environment.ProgressShaping.
+        The expected number of levels cleared, and for each active level the success rate and the mean distance its
+        recent episodes got, see environment.ProgressShaping.
         """
-        metrics = {"levels/cleared": self.score(), "levels/cleared_mean": self.mean_score()}
+        metrics = {"levels/cleared": self.score()}
         for level in self.active_levels:
             if (rate := self.success_rate(level)) is not None:
                 metrics[f"levels/success_{level}"] = rate
@@ -77,20 +69,16 @@ class LevelScheduler:
     def state_dict(self) -> dict:
         """The progress of training, to resume it."""
         return {
-            "results": {level: [(r.flag_get, r.distance) for r in results] for level, results in self.results.items()},
-            "score_sum": self._score_sum,
-            "num_updates": self._num_updates,
+            "results": {level: [(r.flag_get, r.distance) for r in results] for level, results in self.results.items()}
         }
 
     def load_state_dict(self, state: dict) -> None:
         for level, results in state["results"].items():
             self.results[level].extend(LevelResult(*result) for result in results)
-        self._score_sum = state["score_sum"]
-        self._num_updates = state["num_updates"]
 
 
 class CurriculumLevelScheduler(LevelScheduler):
-    """Unlocks levels on mastery and samples them by need, see CurriculumLevelsConfig."""
+    """Unlocks levels and samples them by need, see CurriculumLevelsConfig."""
 
     # Minimum change of a level weight for the new distribution to be sent to the workers
     WEIGHT_TOLERANCE = 0.02
@@ -98,7 +86,7 @@ class CurriculumLevelScheduler(LevelScheduler):
     def __init__(self, config: CurriculumLevelsConfig) -> None:
         super().__init__(config)
         self.config: CurriculumLevelsConfig = config
-        self.num_unlocked = config.initial_levels
+        self.num_unlocked = 1
         # The distribution the workers currently use
         self._sent_distribution = config.initial_distribution()
 
@@ -118,23 +106,20 @@ class CurriculumLevelScheduler(LevelScheduler):
         total = sum(weights)
         return self.unlocked_levels, [weight / total for weight in weights]
 
-    def is_mastered(self) -> bool:
-        """Whether the agent masters the newest level and, on average, all unlocked levels."""
-        if len(self.results[self.newest_level]) < self.config.success_window:
+    def can_unlock(self) -> bool:
+        """Whether the newest level reached its flag in a full window and all unlocked levels are good enough."""
+        newest = self.results[self.newest_level]
+        if len(newest) < self.config.success_window or not any(result.flag_get for result in newest):
             return False
         if any(len(self.results[level]) < self.config.min_level_episodes for level in self.unlocked_levels):
             return False
         rates = [self.success_rate(level) or 0.0 for level in self.unlocked_levels]
-        return (
-            rates[-1] >= self.config.unlock_success_rate
-            and sum(rates) / len(rates) >= self.config.unlock_mean_success_rate
-        )
+        return sum(rates) / len(rates) >= self.config.unlock_mean_success_rate
 
     def update(self) -> bool:
-        if self.num_unlocked < len(self.config.levels) and self.is_mastered():
+        if self.num_unlocked < len(self.config.levels) and self.can_unlock():
             self.num_unlocked += 1
             log.info(f"Unlocked level {self.newest_level}.")
-        super().update()
 
         # The weights follow the success rates, so the distribution can change without an unlock
         levels, weights = self.distribution()

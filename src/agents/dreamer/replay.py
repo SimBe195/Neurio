@@ -26,6 +26,9 @@ class Replay:
 
     Rare experience can be sampled more often: around a step picked by the rarity stored with it, e.g. 1 / visits of
     Mario's place, which the uniform sampling would otherwise only rarely replay.
+
+    Training writes back the model states it computes for the sampled steps (`write_latents`), so that sequences start
+    from states of the current model rather than of the one that acted, which may have been long ago.
     """
 
     def __init__(
@@ -118,7 +121,8 @@ class Replay:
         :param num_rare: Number of sequences, the last ones, around a step picked with probability by its rarity
         :return: Sequences of shape (batch, length, ...) for "frames", "actions", "rewards", "is_first", "is_last" and
             "is_terminal", and of shape (batch, ...) the step before each: its "start_deter", "start_stoch" and
-            "start_action"
+            "start_action". Where they are stored, for `write_latents`: each one's "worker" and the number of the
+            worker's added steps at which it starts, "first".
         """
         starts = [self._sample_start(online) for _ in range(batch_size - num_rare)] + self._sample_rare_starts(num_rare)
         workers = np.array([worker for worker, _ in starts])
@@ -133,12 +137,34 @@ class Replay:
             start_deter=self.deter[workers, before],
             start_stoch=self.stoch[workers, before],
             start_action=self.actions[workers, before],
+            worker=workers,
+            first=first,
         )
         # Without the step before, the sequence starts from a fresh state
         batch["is_first"][:, 0] |= first - 1 < np.maximum(self.added[workers] - self.size, 0)
         # An episode cut off by the next one ends there
         batch["is_last"][:, :-1] |= batch["is_first"][:, 1:]
         return batch
+
+    def write_latents(
+        self,
+        workers: npt.NDArray[np.int64],
+        firsts: npt.NDArray[np.int64],
+        deter: npt.NDArray[np.float16],
+        stoch: npt.NDArray[np.uint8],
+    ) -> None:
+        """
+        Store model states of sampled sequences, see `sample`, except of steps that newer ones overwrote since.
+
+        :param deter: Of shape (batch, length, deter)
+        :param stoch: Of shape (batch, length, stoch), the class of each variable
+        """
+        steps = firsts[:, None] + np.arange(self.length)
+        stored = steps >= (self.added[workers] - self.size)[:, None]
+        rows = np.broadcast_to(workers[:, None], steps.shape)[stored]
+        indices = steps[stored] % self.size
+        self.deter[rows, indices] = deter[stored]
+        self.stoch[rows, indices] = stoch[stored]
 
     def _sample_start(self, online: bool) -> tuple[int, int]:
         """A worker and the number of its added steps at which a sequence starts that is still fully stored."""

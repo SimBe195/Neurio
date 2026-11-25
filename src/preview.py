@@ -23,6 +23,7 @@ from omegaconf import DictConfig
 
 from agents.dreamer import DreamerAgent
 from agents.dreamer.agent import PREVIEW_SEQUENCES
+from agents.dreamer.best_episodes import sequence
 from agents.dreamer.preview import render_preview, save_gif
 from evaluation import load_evaluation
 
@@ -59,20 +60,7 @@ def sample_sequences(
         episode = play_episode(env, agent)
         if len(episode["frames"]) >= length:
             start = int(rng.integers(len(episode["frames"]) - length + 1))
-            # The step before the sequence, at the start of the episode its first one, which is_first resets
-            before = max(start - 1, 0)
-            is_first = np.zeros(length, bool)
-            is_first[0] = start == 0
-            sequences.append(
-                {
-                    "frames": episode["frames"][start : start + length],
-                    "actions": episode["actions"][start : start + length],
-                    "is_first": is_first,
-                    "start_deter": episode["deter"][before],
-                    "start_stoch": episode["stoch"][before],
-                    "start_action": episode["actions"][before],
-                }
-            )
+            sequences.append(sequence(episode, start, length))
         if len(sequences) == PREVIEW_SEQUENCES:
             break
     assert sequences, f"No episode lasted {length} steps."

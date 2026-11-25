@@ -1,5 +1,5 @@
 defaults:
-  - agent: ppo
+  - agent: dreamer
   - environment: base
   - levels: curriculum
   - _self_
@@ -12,12 +12,8 @@ steps_per_iter: 128
 save_frequency: 100
 # Iterations between saves of the full state of training to resume from, which take several GB with the agent's replay
 resume_frequency: 1000
-render: False
 # Relative paths are resolved against the directory training is started from
 tracking_uri: sqlite:///mlflow.db
-# The objective, e.g. for hyperparameter search and to pick the best run for test.py: cleared, the expected number of
-# levels cleared, or cleared_mean, its mean over the run
-objective: cleared
 # Curiosity driven exploration, see config.exploration.ExplorationConfig. A step of careful progress earns about 0.15
 # (0.025 per pixel after the reward scale, at about 6 pixels), so a step to the left instead of the right costs about
 # 0.3. A bonus of 1 for a new cell outweighs that until about 10 visits, while cells visited thousands of times pay
@@ -27,11 +23,6 @@ exploration:
   _target_: config.exploration.ExplorationConfig
   bonus_scale: 1.0
   cell_size: 16
-  # Where a level is stuck, each action is tried once per cell, from the wall backwards: on 8-4, the agent took about
-  # 21k iterations after unlocking it in one run and more than 9k in another to press down on the floating pipe, which
-  # its policy had ruled out everywhere. Trying all actions in every cell instead made first flags on new levels come 3
-  # to 10 times later, because Mario hardly got further at the frontier.
-  try_all_actions: true
 # mlflow tags of the run, add some with +tags.<name>=<value>
 tags: {}
 # Continue an interrupted run with the same config from its last checkpoint: true, false (start a new run) or null (ask)

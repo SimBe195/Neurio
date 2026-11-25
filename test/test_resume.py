@@ -12,11 +12,14 @@ from resume import (
     PreviousRun,
     decide_resume,
     discard_after,
+    load_training_state,
     local_artifacts,
+    save_training_state,
 )
 
-RUN = PreviousRun("abc123", "brave-fox", datetime.datetime(2026, 10, 6, 12, 0), iteration=140, num_iters=1000)
-FINISHED = PreviousRun("abc123", "brave-fox", datetime.datetime(2026, 10, 6, 12, 0), iteration=1000, num_iters=1000)
+START, LAST_LOGGED = datetime.datetime(2026, 10, 6, 12, 0), datetime.datetime(2026, 10, 7, 9, 30)
+RUN = PreviousRun("abc123", "brave-fox", START, LAST_LOGGED, iteration=140, num_iters=1000)
+FINISHED = PreviousRun("abc123", "brave-fox", START, LAST_LOGGED, iteration=1000, num_iters=1000)
 
 
 def test_explicit_choice():
@@ -46,6 +49,8 @@ def test_asks_in_a_terminal(monkeypatch):
     # Asked again after an invalid answer
     assert len(questions) == 2
     assert "iteration 140 of 1000" in questions[0]
+    # When it last logged, which tells a run that is still training from one that stopped
+    assert "2026-10-07 09:30" in questions[0]
     assert decide_resume(RUN, resume=None, ask=lambda _: "n") is None
 
 
@@ -71,9 +76,9 @@ def test_restored_state_survives_safe_loading(tmp_path, monkeypatch):
     restored = _make_agent(monkeypatch, sil_loss_weight=1.0)
     restored.load_state_dict(torch.load(tmp_path / "state.pt", weights_only=True))
     assert restored.update_step == 7
-    (episode,) = restored.self_imitation.episodes["1-3"]
+    (episode,) = restored.self_imitation.episodes["1-3 small"]
     assert episode.total_reward == 3.0
-    assert torch.equal(episode.frames, agent.self_imitation.episodes["1-3"][0].frames)
+    assert torch.equal(episode.frames, agent.self_imitation.episodes["1-3 small"][0].frames)
     for name, value in agent.actor_critic.state_dict().items():
         assert torch.equal(value, restored.actor_critic.state_dict()[name])
 
@@ -111,3 +116,15 @@ def test_nothing_to_discard(run_id):
     discard_after(run_id, 5)
     assert len(mlflow.MlflowClient().get_metric_history(run_id, "loss")) == 5
     assert len(list(local_artifacts(run_id).iterdir())) == 3
+
+
+def test_restored_state_stays_intact_through_later_saves(run_id):
+    with mlflow.start_run(run_id=run_id):
+        save_training_state(1, {"frames": torch.zeros(4096)})
+        _, state = load_training_state(run_id)
+        # Restored tensors may be kept as they are, e.g. PPO's self-imitation episodes
+        kept = state["frames"]
+        for iteration in (2, 3):
+            save_training_state(iteration, {"frames": torch.ones(8192)})
+    assert not kept.any()
+    assert load_training_state(run_id)[1]["frames"].all()

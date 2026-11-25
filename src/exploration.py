@@ -30,6 +30,11 @@ class NoveltyBonus:
             visits[worker] = self.counts[cell]
         return visits
 
+    def visits(self, positions: list[Position]) -> np.ndarray:
+        """How often the cells of the positions have been visited, at least once, without counting a visit."""
+        cells = [(*area, x // self.cell_size, y // self.cell_size) for *area, x, y in positions]
+        return np.array([max(self.counts.get(cell, 0), 1) for cell in cells], dtype=np.int64)
+
     def bonus(self, visits: np.ndarray) -> np.ndarray:
         return (self.scale / np.sqrt(visits)).astype(np.float32)
 

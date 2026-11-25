@@ -2,6 +2,7 @@ import copy
 import tempfile
 from collections import defaultdict
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 
 import mlflow
@@ -12,9 +13,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from jaxtyping import Float
 
-from agents.agent import Agent, StepOutcome, checkpoint_name, get_device
+from agents.agent import Agent, Play, StepOutcome, checkpoint_name, get_device
 from config.agent import DreamerAgentConfig
-from environment import EnvironmentInfo, Powerup
+from environment import EnvironmentInfo
 
 from .best_episodes import BestEpisodes
 from .distributions import Categorical, sample_index
@@ -26,6 +27,10 @@ from .world_model import RSSM, Decoder, Encoder, State
 
 # Number of replayed sequences in the preview stored with each checkpoint
 PREVIEW_SEQUENCES = 6
+
+# Rows of a batch, and what stores the model states computed for them: Replay.write_latents or
+# BestEpisodes.write_latents with the sampled sequences' places, taking the deterministic and stochastic parts
+LatentWriter = tuple[slice, Callable[[np.ndarray, np.ndarray], None]]
 
 
 class DreamerNetworks(nn.Module):
@@ -47,35 +52,31 @@ class DreamerNetworks(nn.Module):
         self.continuation = BernoulliHead(features, config.head_layers, config.units)
         self.actor = PolicyHead(features, config.actor_critic_layers, config.units, env_info.num_actions, config.unimix)
         self.critic = TwoHotHead(features, config.actor_critic_layers, config.units, config.bins)
-        self.explorer: Ensemble | None = None
-        self.exploration_critic: TwoHotHead | None = None
-        if config.exploration_weight > 0:
-            # Predicts the next stochastic state from a state and action
-            self.explorer = Ensemble(
-                features + env_info.num_actions,
-                config.exploration_heads,
-                config.actor_critic_layers,
-                config.units,
-                config.stoch * config.classes,
-            )
-            self.exploration_critic = TwoHotHead(features, config.actor_critic_layers, config.units, config.bins)
+        # Predicts the next stochastic state from a state and action
+        self.explorer = Ensemble(
+            features + env_info.num_actions,
+            config.exploration_heads,
+            config.actor_critic_layers,
+            config.units,
+            config.stoch * config.classes,
+        )
+        self.exploration_critic = TwoHotHead(features, config.actor_critic_layers, config.units, config.bins)
 
 
 def lambda_return(
-    is_last: Float[torch.Tensor, "batch time"],
-    is_terminal: Float[torch.Tensor, "batch time"],
     rewards: Float[torch.Tensor, "batch time"],
     bootstrap: Float[torch.Tensor, "batch time"],
-    discount: float,
+    continuation: Float[torch.Tensor, "batch time"],
     lam: float,
+    is_last: Float[torch.Tensor, "batch time"] | None = None,
 ) -> Float[torch.Tensor, "batch time-1"]:
     """
-    TD(lambda) returns of all but the last step, bootstrapped from the given values. The reward of step t is the one
-    received on reaching it. Returns do not continue past terminal steps, nor, except for the bootstrap value, past
-    the last step of an episode.
+    TD(lambda) returns of all but the last step, bootstrapped from the given values. The reward and the continuation
+    of step t are those of reaching it: the continuation is the discount, 0 for a terminal step. Returns do not
+    continue past the last step of an episode, except for its bootstrap value.
     """
-    live = (1 - is_terminal[:, 1:]) * discount
-    cont = (1 - is_last[:, 1:]) * lam
+    live = continuation[:, 1:]
+    cont = torch.full_like(live, lam) if is_last is None else (1 - is_last[:, 1:]) * lam
     interim = rewards[:, 1:] + (1 - cont) * live * bootstrap[:, 1:]
     returns = [bootstrap[:, -1]]
     for t in reversed(range(live.shape[1])):
@@ -126,20 +127,16 @@ class DreamerAgent(Agent):
                 setattr(self.model.rssm, step, torch.compile(getattr(self.model.rssm, step)))
             self.imagine = torch.compile(self._imagine)
         self.slow_critic = copy.deepcopy(self.model.critic).requires_grad_(False)
-        self.slow_exploration_critic = copy.deepcopy(self.model.exploration_critic)
-        if self.slow_exploration_critic is not None:
-            self.slow_exploration_critic.requires_grad_(False)
+        self.slow_exploration_critic = copy.deepcopy(self.model.exploration_critic).requires_grad_(False)
         self.optimizer = LaProp(self.model.parameters(), config.learning_rate, config.agc, warmup=config.warmup)
         frame_shape = (env_info.height, env_info.width, env_info.image_channels)
         latent_sizes = {"deter": config.deter, "stoch": config.stoch}
         self.replay = Replay(config.replay_size, self.num_workers, frame_shape, config.batch_length, **latent_sizes)
-        self.best_episodes = (
-            BestEpisodes(
-                self.num_workers, config.sil_episodes_per_level, config.batch_length, config.discount, **latent_sizes
-            )
-            if config.sil_fraction > 0
-            else None
+        self.best_episodes = BestEpisodes(
+            self.num_workers, config.sil_episodes_per_level, config.batch_length, config.discount, **latent_sizes
         )
+        # Sequences of each batch from the best episodes, see DreamerAgentConfig.sil_fraction
+        self.num_best = round(config.batch_size * config.sil_fraction)
         # Running percentiles of the imagined returns of the game's reward and of the exploration reward
         self.return_ranges = {name: torch.zeros(2, device=self.device) for name in ("reward", "exploration")}
         self.return_quantiles = torch.tensor(config.return_percentiles, device=self.device) / 100
@@ -148,14 +145,19 @@ class DreamerAgent(Agent):
         self.update_budget = 0.0
         # Metrics of the updates since the last `update`, still on the device
         self._metrics: defaultdict[str, list[torch.Tensor]] = defaultdict(list)
+        # Model states of the last update on their way from the GPU, written back before the next sample
+        self._pending_latents: tuple[list[LatentWriter], torch.Tensor, torch.Tensor, torch.cuda.Event | None] | None
+        self._pending_latents = None
 
         self.state = self.model.rssm.initial(self.num_workers, self.device)
         self.prev_actions = torch.zeros(self.num_workers, env_info.num_actions, device=self.device)
         self.is_first = np.ones(self.num_workers, bool)
         # Reward received on reaching the current frame of each worker, and the game's reward, which ranks episodes
         self.rewards = np.zeros(self.num_workers, np.float32)
+        # The same without the novelty bonus, for the best episodes, see StepOutcome.task_rewards
+        self.task_rewards = np.zeros(self.num_workers, np.float32)
         self.game_rewards = np.zeros(self.num_workers, np.float32)
-        # How rare the current frame of each worker is, see StepOutcome.rarity
+        # How rare the current frame of each worker is, see StepOutcome.rarity; unknown for the first frames of training
         self.rarity = np.ones(self.num_workers, np.float32)
         self._recording = False
 
@@ -172,61 +174,56 @@ class DreamerAgent(Agent):
 
     def state_dict(self) -> dict:
         """Everything training needs to continue, but the episodes in progress, which start anew."""
+        self._write_latents()
         return {
             "model": self.model.state_dict(),
             "slow_critic": self.slow_critic.state_dict(),
-            "slow_exploration_critic": (
-                self.slow_exploration_critic.state_dict() if self.slow_exploration_critic is not None else {}
-            ),
+            "slow_exploration_critic": self.slow_exploration_critic.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "return_ranges": self.return_ranges,
             "updates": self.updates,
             "update_budget": self.update_budget,
             "replay": self.replay.state_dict(),
-            "best_episodes": self.best_episodes.state_dict() if self.best_episodes is not None else {},
+            "best_episodes": self.best_episodes.state_dict(),
         }
 
     def load_state_dict(self, state: dict) -> None:
         self.model.load_state_dict(state["model"])
         self.slow_critic.load_state_dict(state["slow_critic"])
-        if self.slow_exploration_critic is not None:
-            self.slow_exploration_critic.load_state_dict(state["slow_exploration_critic"])
+        self.slow_exploration_critic.load_state_dict(state["slow_exploration_critic"])
         self.optimizer.load_state_dict(state["optimizer"])
         self.return_ranges = {name: value.to(self.device) for name, value in state["return_ranges"].items()}
         self.updates = state["updates"]
         self.update_budget = state["update_budget"]
-        # States saved before the experience was stored lack it
-        if "replay" in state:
-            self.replay.load_state_dict(state["replay"])
-        if self.best_episodes is not None and "best_episodes" in state:
-            self.best_episodes.load_state_dict(state["best_episodes"])
+        self.replay.load_state_dict(state["replay"])
+        self.best_episodes.load_state_dict(state["best_episodes"])
 
     @torch.no_grad()
-    def act(self, observations: np.ndarray, greedy: bool = False, untried: np.ndarray | None = None) -> list[int]:
+    def act(self, observations: np.ndarray, play: Play = Play.TRAIN, untried: np.ndarray | None = None) -> list[int]:
         frames = np.asarray(observations)[:, -1]
         tokens = self.model.encoder(torch.as_tensor(frames, device=self.device))
         is_first = torch.as_tensor(self.is_first, device=self.device)
         state = self.model.rssm.observe_step(self.state, self.prev_actions, tokens, is_first)
         policy = self.model.actor(state.features)
-        actions = policy.mode() if greedy else policy.sample()
+        actions = policy.mode() if play is Play.GREEDY else policy.sample()
         if untried is not None and untried.any():
             # The untried action by the policy, which only matters for its order: all are tried in turn
             mask = torch.as_tensor(untried, device=self.device)
             untried_actions = sample_index(policy.log_probs.masked_fill(~mask, -torch.inf))
             actions = torch.where(mask.any(-1), untried_actions, actions)
-        self._recording = not greedy
+        self._recording = play is Play.TRAIN
         if self._recording:
             # The state of each step is stored, so that replayed sequences can start from it
             deters = state.deter.half().cpu().numpy()
             stochs = state.stoch.argmax(-1).byte().cpu().numpy()
             for worker, action in enumerate(actions.tolist()):
                 latent = Latent(deters[worker], stochs[worker])
-                reward, is_first = self.rewards[worker], bool(self.is_first[worker])
-                self.replay.add(worker, frames[worker], action, reward, is_first, latent, rarity=self.rarity[worker])
-                if self.best_episodes is not None:
-                    self.best_episodes.add(worker, frames[worker], action, reward, self.game_rewards[worker], latent)
+                reward, first = self.rewards[worker], bool(self.is_first[worker])
+                self.replay.add(worker, frames[worker], action, reward, first, latent, rarity=self.rarity[worker])
+                task_reward, game_reward = self.task_rewards[worker], self.game_rewards[worker]
+                self.best_episodes.add(worker, frames[worker], action, task_reward, game_reward, latent)
             self.update_budget += self.num_workers * self._updates_per_step
-        self.state = State(state.deter.float(), state.stoch.float())
+        self.state = state.without_logits()
         self.prev_actions = F.one_hot(actions, self.env_info.num_actions).float()
         self.is_first[:] = False
         return actions.tolist()
@@ -237,8 +234,8 @@ class DreamerAgent(Agent):
 
     def observe(self, outcome: StepOutcome) -> None:
         self.rewards = outcome.rewards.astype(np.float32)
-        if outcome.game_rewards is not None:
-            self.game_rewards = outcome.game_rewards.astype(np.float32)
+        self.task_rewards = outcome.task_rewards.astype(np.float32)
+        self.game_rewards = outcome.game_rewards.astype(np.float32)
         if outcome.rarity is not None:
             self.rarity = outcome.rarity.astype(np.float32)
         for worker in map(int, np.flatnonzero(outcome.dones)):
@@ -251,16 +248,17 @@ class DreamerAgent(Agent):
                     worker, frame, 0, reward, False, None, is_last=True, is_terminal=terminal, rarity=rarity
                 )
                 self.update_budget += self._updates_per_step
-                if self.best_episodes is not None:
-                    reward, game_reward = self.rewards[worker], self.game_rewards[worker]
-                    group = outcome.levels[worker]
-                    if outcome.start_powerups is not None:
-                        group += f" {Powerup(int(outcome.start_powerups[worker])).name.lower()}"
-                    self.best_episodes.finish(worker, frame, reward, game_reward, terminal, group)
-            self.rewards[worker] = 0.0
-            self.game_rewards[worker] = 0.0
-            self.rarity[worker] = 1.0
+                group = outcome.episode_groups[worker]
+                task_reward, game_reward = self.task_rewards[worker], self.game_rewards[worker]
+                self.best_episodes.finish(worker, frame, task_reward, game_reward, terminal, group)
+            self.rewards[worker] = self.task_rewards[worker] = self.game_rewards[worker] = 0.0
+            self.rarity[worker] = 1.0 if outcome.first_rarity is None else outcome.first_rarity[worker]
             self.is_first[worker] = True
+
+    def reset(self) -> None:
+        self.is_first[:] = True
+        self.rewards[:] = self.task_rewards[:] = self.game_rewards[:] = 0.0
+        self.rarity[:] = 1.0
 
     def train_while_playing(self) -> None:
         """The updates owed to the steps so far, see DreamerAgentConfig.train_ratio."""
@@ -269,7 +267,7 @@ class DreamerAgent(Agent):
             return
         while self.update_budget >= 1:
             self.update_budget -= 1
-            for name, value in self._train_step(self._sample()).items():
+            for name, value in self._train_step(*self._sample()).items():
                 self._metrics[name].append(value)
 
     def update(self) -> dict[str, float]:
@@ -282,24 +280,32 @@ class DreamerAgent(Agent):
         self._metrics.clear()
         return metrics
 
-    def _sample(self) -> dict[str, np.ndarray]:
+    def _sample(self) -> tuple[dict[str, np.ndarray], list[LatentWriter]]:
         """
-        A batch of replayed sequences, a share of them rare ones (see DreamerAgentConfig.rare_fraction), and the last
-        ones from the best episodes once there are some. Then all have "returns" for self-imitation, zero for the
-        replayed ones.
+        :return: A batch of replayed sequences, a share of them rare ones (see DreamerAgentConfig.rare_fraction), and
+            the last ones from the best episodes once there are some. Then all have "returns" for self-imitation, zero
+            for the replayed ones. And for each part, its rows and where to write back their model states.
         """
+        self._write_latents()
         batch_size, rare_fraction = self.config.batch_size, self.config.rare_fraction
-        num_best = round(batch_size * self.config.sil_fraction)
-        if self.best_episodes is None or not len(self.best_episodes) or not num_best:
-            return self.replay.sample(batch_size, num_rare=round(batch_size * rare_fraction))
+        num_best = self.num_best if len(self.best_episodes) else 0
         num_replayed = batch_size - num_best
         replayed = self.replay.sample(num_replayed, num_rare=round(num_replayed * rare_fraction))
+        workers, firsts = replayed.pop("worker"), replayed.pop("first")
+        writers = [(slice(0, num_replayed), partial(self.replay.write_latents, workers, firsts))]
+        if not num_best:
+            return replayed, writers
         best = self.best_episodes.sample(num_best)
+        episodes, firsts = best.pop("episode"), best.pop("first")
+        writers.append((slice(num_replayed, None), partial(self.best_episodes.write_latents, episodes, firsts)))
         replayed["returns"] = np.zeros(replayed["rewards"].shape, np.float32)
-        return {name: np.concatenate([replayed[name], best[name]]) for name in best}
+        return {name: np.concatenate([replayed[name], best[name]]) for name in best}, writers
 
-    def _train_step(self, batch: dict[str, np.ndarray]) -> dict[str, torch.Tensor]:
-        """:return: The metrics of the update, still on the device"""
+    def _train_step(self, batch: dict[str, np.ndarray], writers: list[LatentWriter]) -> dict[str, torch.Tensor]:
+        """
+        :param writers: See `_sample`. The model states the update computes are written back before the next sample.
+        :return: The metrics of the update, still on the device
+        """
         config, model = self.config, self.model
         data = {name: torch.as_tensor(value, device=self.device) for name, value in batch.items()}
         actions = self._onehot(data["actions"])
@@ -314,6 +320,7 @@ class DreamerAgent(Agent):
 
         # World model
         posterior = model.rssm.observe(start, prev_actions, model.encoder(data["frames"]), is_first)
+        self._copy_latents(posterior, writers)
         losses["dynamics"], losses["representation"] = model.rssm.kl_losses(posterior)
         features = posterior.features
         reconstruction = model.decoder(posterior).float()
@@ -322,13 +329,12 @@ class DreamerAgent(Agent):
         losses["reward"] = model.reward(features).loss(rewards)
         continuation = (1 - is_terminal) * config.discount
         losses["continuation"] = model.continuation(features).loss(continuation)
-        if model.explorer is not None:
-            # Each head predicts the next stochastic state, except across the start of an episode and from the final
-            # frame, whose action is a placeholder
-            inputs = torch.cat([features[:, :-1].detach().float(), actions[:, :-1]], -1)
-            next_stoch = posterior.stoch[:, 1:].flatten(2).detach().float()
-            valid = (1 - is_first[:, 1:].float()) * (1 - is_last[:, :-1])
-            losses["disagreement"] = valid * (model.explorer(inputs) - next_stoch).square().mean((0, -1))
+        # Each Plan2Explore head predicts the next stochastic state, except across the start of an episode and from the
+        # final frame, whose action is a placeholder
+        inputs = torch.cat([features[:, :-1].detach(), actions[:, :-1]], -1)
+        next_stoch = posterior.stoch[:, 1:].flatten(2).detach()
+        valid = (1 - is_first[:, 1:].float()) * (1 - is_last[:, :-1])
+        losses["disagreement"] = valid * (model.explorer(inputs) - next_stoch).square().mean((0, -1))
 
         # Actor and critics on imagined rollouts from every replayed state
         imagined, imagined_actions = self.imagine(posterior.detach().map(lambda x: x.flatten(0, 1)))
@@ -344,50 +350,43 @@ class DreamerAgent(Agent):
             scale = self._update_return_range("reward", returns)
             advantages = (returns - values[:, :-1]) / scale
             metrics.update({"behavior/imagined_return": returns.mean(), "behavior/return_scale": scale})
-            if model.explorer is not None:
-                assert model.exploration_critic is not None and self.slow_exploration_critic is not None
-                # Rewarded on reaching the state after the action the heads disagree about
-                inputs = torch.cat([imagined_features[:, :-1].float(), self._onehot(imagined_actions[:, :-1])], -1)
-                novelty = F.pad(model.explorer(inputs).std(0).mean(-1), (1, 0))
-                exploration_returns, exploration_values, exploration_slow_values = self._imagined_returns(
-                    model.exploration_critic,
-                    self.slow_exploration_critic,
-                    imagined_features,
-                    novelty,
-                    imagined_continuation,
-                )
-                # The disagreement is small but never sparse, so its returns are normalized whatever their range
-                exploration_scale = self._update_return_range("exploration", exploration_returns, minimum=1e-3)
-                advantages += (
-                    config.exploration_weight * (exploration_returns - exploration_values[:, :-1]) / exploration_scale
-                )
-                metrics["exploration/plan2explore_reward"] = novelty[:, 1:].mean()
-        logits = model.actor.logits(imagined_features[:, :-1]).float()
-        if config.loss_scales["cmpo"] > 0:
-            # Muesli's CMPO regularizer: the actor moves towards its policy reweighted by the advantages of all actions
-            # of each replayed state, valued one imagined step ahead, so that it also learns of better actions that it
-            # rarely samples, e.g. pressing down on a pipe. The prior is the current policy instead of Muesli's target
-            # network. All of this is in the actor's own policy, before the uniform mixture with which actions are
-            # sampled. Its target is label smoothed, so that it pulls up even actions the actor had ruled out. The
-            # advantages combine the game's and Plan2Explore's like those of the policy gradient, so that the actor
-            # also tries actions whose outcome the world model is unsure about, which it has never seen taken there.
-            own_log_probs = torch.log_softmax(logits[:, 0], -1)
-            with torch.no_grad():
-                task_values, exploration_action_values = self._action_values(imagined.map(lambda x: x[:, 0]))
-                action_advantages = (task_values - values[:, :1]) / scale
-                if exploration_action_values is not None:
-                    action_advantages += (
-                        config.exploration_weight
-                        * (exploration_action_values - exploration_values[:, :1])
-                        / exploration_scale
-                    )
-                targets = cmpo_targets(own_log_probs, action_advantages)
-                changed = targets.argmax(-1) != own_log_probs.argmax(-1)
-                metrics["behavior/cmpo_changes"] = changed.float().mean()
-                smoothing = config.cmpo_label_smoothing
-                targets = (1 - smoothing) * targets + smoothing / targets.shape[-1]
-            acting = 1 - is_last.flatten()
-            losses["cmpo"] = -acting * (targets * own_log_probs).sum(-1)
+            # Plan2Explore: rewarded on reaching the state after the action the heads disagree about
+            inputs = torch.cat([imagined_features[:, :-1], self._onehot(imagined_actions[:, :-1])], -1)
+            novelty = F.pad(model.explorer(inputs).std(0).mean(-1), (1, 0))
+            exploration_returns, exploration_values, exploration_slow_values = self._imagined_returns(
+                model.exploration_critic,
+                self.slow_exploration_critic,
+                imagined_features,
+                novelty,
+                imagined_continuation,
+            )
+            # The disagreement is small but never sparse, so its returns are normalized whatever their range
+            exploration_scale = self._update_return_range("exploration", exploration_returns, minimum=1e-3)
+            advantages += (
+                config.exploration_weight * (exploration_returns - exploration_values[:, :-1]) / exploration_scale
+            )
+            metrics["exploration/plan2explore_reward"] = novelty[:, 1:].mean()
+        logits = model.actor.logits(imagined_features[:, :-1])
+        # Muesli's CMPO regularizer: the actor moves towards its policy reweighted by the advantages of all actions of
+        # each replayed state, valued one imagined step ahead, so that it also learns of better actions that it rarely
+        # samples, e.g. pressing down on a pipe. The prior is the current policy instead of Muesli's target network.
+        # All of this is in the actor's own policy, before the uniform mixture with which actions are sampled. Its
+        # target is label smoothed, so that it pulls up even actions the actor had ruled out. The advantages combine
+        # the game's and Plan2Explore's like those of the policy gradient, so that the actor also tries actions whose
+        # outcome the world model is unsure about, which it has never seen taken there.
+        own_log_probs = torch.log_softmax(logits[:, 0], -1)
+        with torch.no_grad():
+            task_values, exploration_action_values = self._action_values(imagined.map(lambda x: x[:, 0]))
+            action_advantages = (task_values - values[:, :1]) / scale + config.exploration_weight * (
+                exploration_action_values - exploration_values[:, :1]
+            ) / exploration_scale
+            targets = cmpo_targets(own_log_probs, action_advantages)
+            changed = targets.argmax(-1) != own_log_probs.argmax(-1)
+            metrics["behavior/cmpo_changes"] = changed.float().mean()
+            smoothing = config.cmpo_label_smoothing
+            targets = (1 - smoothing) * targets + smoothing / targets.shape[-1]
+        acting = 1 - is_last.flatten()
+        losses["cmpo"] = -acting * (targets * own_log_probs).sum(-1)
         policy = Categorical(logits, config.unimix)
         log_probs = policy.log_prob(imagined_actions[:, :-1])
         entropy = policy.entropy()
@@ -396,23 +395,16 @@ class DreamerAgent(Agent):
         losses["value"] = weight * (
             critic.loss(returns) + config.slow_regularization * critic.loss(slow_values[:, :-1])
         )
-        if model.exploration_critic is not None:
-            critic = model.exploration_critic(imagined_features[:, :-1])
-            losses["exploration_value"] = weight * (
-                critic.loss(exploration_returns)
-                + config.slow_regularization * critic.loss(exploration_slow_values[:, :-1])
-            )
+        critic = model.exploration_critic(imagined_features[:, :-1])
+        losses["exploration_value"] = weight * (
+            critic.loss(exploration_returns) + config.slow_regularization * critic.loss(exploration_slow_values[:, :-1])
+        )
 
         # Critic on the replayed sequences, bootstrapped from the imagined returns
         replay_critic = model.critic(features[:, :-1])
         with torch.no_grad():
             replay_returns = lambda_return(
-                is_last,
-                is_terminal,
-                rewards,
-                returns[:, 0].unflatten(0, (batch_size, length)),
-                config.discount,
-                config.lam,
+                rewards, returns[:, 0].unflatten(0, (batch_size, length)), continuation, config.lam, is_last
             )
             slow_replay_values = self.slow_critic(features[:, :-1]).mean()
         losses["replay_value"] = (1 - is_last[:, :-1]) * (
@@ -422,7 +414,7 @@ class DreamerAgent(Agent):
         if "returns" in data:
             # Self-imitation (Oh et al., 2018): the actions of the best episodes, the last ones of the batch, where
             # their return beat the critic's expectation, except the placeholder action of the final frame
-            num_best = round(batch_size * config.sil_fraction)
+            num_best = self.num_best
             sil_features = features[-num_best:].detach()
             with torch.no_grad():
                 sil_advantages = (data["returns"][-num_best:] - model.critic(sil_features).mean()).clamp(min=0) / scale
@@ -443,6 +435,30 @@ class DreamerAgent(Agent):
             "behavior/entropy": entropy.detach().mean(),
         }
 
+    def _copy_latents(self, posterior: State, writers: list[LatentWriter]) -> None:
+        """Start copying the model states of the replayed steps to the CPU, without waiting for the update."""
+        deter = posterior.deter.detach().half()
+        stoch = posterior.stoch.detach().argmax(-1).byte()
+        if self.device.type != "cuda":
+            self._pending_latents = (writers, deter, stoch, None)
+            return
+        deter_copy = torch.empty(deter.shape, dtype=deter.dtype, pin_memory=True).copy_(deter, non_blocking=True)
+        stoch_copy = torch.empty(stoch.shape, dtype=stoch.dtype, pin_memory=True).copy_(stoch, non_blocking=True)
+        event = torch.cuda.Event()
+        event.record()
+        self._pending_latents = (writers, deter_copy, stoch_copy, event)
+
+    def _write_latents(self) -> None:
+        """Write back the model states of the last update, see `_copy_latents`."""
+        if self._pending_latents is None:
+            return
+        writers, deter, stoch, event = self._pending_latents
+        if event is not None:
+            event.synchronize()
+        for rows, write in writers:
+            write(deter[rows].numpy(), stoch[rows].numpy())
+        self._pending_latents = None
+
     def _imagined_returns(
         self,
         critic: nn.Module,
@@ -453,7 +469,7 @@ class DreamerAgent(Agent):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """:return: The lambda returns of the imagined rewards, and the critic's and slow critic's values"""
         values = critic(features).mean()
-        returns = lambda_return(torch.zeros_like(values), 1 - continuation, rewards, values, 1.0, self.config.lam)
+        returns = lambda_return(rewards, values, continuation, self.config.lam)
         return returns, values, slow_critic(features).mean()
 
     def save(self, iteration: int) -> None:
@@ -489,7 +505,7 @@ class DreamerAgent(Agent):
             else:
                 action = self.model.actor(state.features).sample() if dream else actions[:, t - 1]
                 state = self.model.rssm.imagine_step(state, self._onehot(action))
-            states.append(State(state.deter, state.stoch))
+            states.append(state.without_logits())
         predicted = self.model.decoder(State.stack(states, 1))
         return (predicted * 255).round().byte().cpu().numpy()
 
@@ -508,17 +524,16 @@ class DreamerAgent(Agent):
         for _ in range(self.config.imagination_length):
             action = self.model.actor(states[-1].features).sample()
             actions.append(action)
-            onehot = F.one_hot(action, self.env_info.num_actions).float()
-            states.append(self.model.rssm.imagine_step(states[-1], onehot))
+            states.append(self.model.rssm.imagine_step(states[-1], self._onehot(action)))
         actions.append(self.model.actor(states[-1].features).sample())
-        return State.stack([State(s.deter, s.stoch) for s in states], 1), torch.stack(actions, 1)
+        return State.stack([state.without_logits() for state in states], 1), torch.stack(actions, 1)
 
     def _action_values(
         self, start: State
-    ) -> tuple[Float[torch.Tensor, "batch actions"], Float[torch.Tensor, "batch actions"] | None]:
+    ) -> tuple[Float[torch.Tensor, "batch actions"], Float[torch.Tensor, "batch actions"]]:
         """
         Of each action in each state: the predicted reward of the step plus the value of the state it leads to, and
-        likewise for Plan2Explore, whose reward is the disagreement about that step, if it is enabled.
+        likewise for Plan2Explore, whose reward is the disagreement about that step.
         """
         model, n = self.model, self.env_info.num_actions
         states = start.map(lambda x: x.repeat_interleave(n, 0))
@@ -526,10 +541,7 @@ class DreamerAgent(Agent):
         features = model.rssm.imagine_step(states, actions).features
         continuation = model.continuation(features).prob()
         values = model.reward(features).mean() + continuation * model.critic(features).mean()
-        if model.explorer is None:
-            return values.unflatten(0, (-1, n)), None
-        assert model.exploration_critic is not None
-        novelty = model.explorer(torch.cat([states.features.float(), actions], -1)).std(0).mean(-1)
+        novelty = model.explorer(torch.cat([states.features, actions], -1)).std(0).mean(-1)
         exploration = novelty + continuation * model.exploration_critic(features).mean()
         return values.unflatten(0, (-1, n)), exploration.unflatten(0, (-1, n))
 
@@ -548,7 +560,5 @@ class DreamerAgent(Agent):
     def _update_slow_critics(self) -> None:
         pairs = [(self.slow_critic, self.model.critic), (self.slow_exploration_critic, self.model.exploration_critic)]
         for slow_critic, critic in pairs:
-            if slow_critic is None or critic is None:
-                continue
             for slow, current in zip(slow_critic.parameters(), critic.parameters(), strict=True):
                 slow.lerp_(current, self.config.slow_critic_rate)

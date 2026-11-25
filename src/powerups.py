@@ -14,7 +14,7 @@ class StartPowerups:
     has reached its flag in a period.
     """
 
-    def __init__(self, period: int) -> None:
+    def __init__(self, period: int = 1000) -> None:
         """:param period: Iterations over which the finishes are counted"""
         self.period = period
         self.finishes: dict[str, Counter[Powerup]] = {}

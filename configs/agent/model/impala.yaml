@@ -1,7 +1,0 @@
-# IMPALA residual encoder, twice as wide as the original, which helped generalization in Procgen
-_target_: config.model.ImpalaActorCriticConfig
-
-action_embedding_size: 16
-channels: [32, 64, 64]
-blocks_per_stage: 2
-fc_size: 256

@@ -6,13 +6,14 @@ import torch
 from omegaconf import OmegaConf
 from PIL import Image
 
-from agents import StepOutcome
+from agents import Play, StepOutcome
 from agents.dreamer import DreamerAgent
 from agents.dreamer.agent import cmpo_targets, lambda_return
 from agents.dreamer.best_episodes import BestEpisodes
 from agents.dreamer.distributions import TwoHot, twohot_bins
 from agents.dreamer.preview import PREDICTED_COLOR, SEEN_COLOR, render_preview, save_gif
 from agents.dreamer.replay import Latent, Replay
+from agents.dreamer.world_model import State
 from config.agent import DreamerAgentConfig
 from environment import EnvironmentInfo
 
@@ -42,8 +43,22 @@ def tiny_config(**overrides) -> DreamerAgentConfig:
         imagination_length=3,
         warmup=1,
         learning_rate=1e-3,
+        # All losses take part, whatever the configured scales
+        loss_scales=dict.fromkeys(values["loss_scales"], 1.0),
     )
     return DreamerAgentConfig(**{**values, **overrides})
+
+
+def test_config_rejects_settings_that_fail_later():
+    scales = tiny_config().loss_scales
+    # A misspelled or missing loss would only fail, or be ignored, after the first minutes of training
+    with pytest.raises(AssertionError, match="loss_scales"):
+        tiny_config(loss_scales={**scales, "cmpo_typo": 1.0})
+    with pytest.raises(AssertionError, match="loss_scales"):
+        tiny_config(loss_scales={name: scale for name, scale in scales.items() if name != "cmpo"})
+    # Without the uniform mixture, probabilities underflow to 0 and the entropy and KL become NaN
+    with pytest.raises(AssertionError):
+        tiny_config(unimix=0.0)
 
 
 @pytest.fixture
@@ -60,7 +75,14 @@ def _observations(value: int) -> np.ndarray:
 
 
 def _outcome(
-    observations, rewards, terminated, truncated=(False, False), final_value: int | None = None, rarity=None
+    observations,
+    rewards,
+    terminated,
+    truncated=(False, False),
+    final_value: int | None = None,
+    rarity=None,
+    first_rarity=None,
+    bonuses=None,
 ) -> StepOutcome:
     final = None if final_value is None else np.array(list(_observations(final_value)))
     rewards = np.asarray(rewards, float)
@@ -70,9 +92,12 @@ def _outcome(
         np.asarray(terminated),
         np.asarray(truncated),
         ["1-1"] * 2,
-        final,
         game_rewards=rewards,
+        start_powerups=np.zeros(2, int),
+        final_observations=final,
         rarity=None if rarity is None else np.asarray(rarity),
+        first_rarity=None if first_rarity is None else np.asarray(first_rarity),
+        bonuses=None if bonuses is None else np.asarray(bonuses, float),
     )
 
 
@@ -81,8 +106,8 @@ def test_lambda_return():
     values = torch.tensor([[10.0, 20.0, 30.0, 40.0]])
     no = torch.zeros(1, 4)
 
-    def returns(is_last=no, is_terminal=no, lam=1.0) -> list[float]:
-        return lambda_return(is_last, is_terminal, rewards, values, 0.5, lam)[0].tolist()
+    def returns(is_last=None, is_terminal=no, lam=1.0) -> list[float]:
+        return lambda_return(rewards, values, 0.5 * (1 - is_terminal), lam, is_last)[0].tolist()
 
     # Lambda 1: discounted rewards up to the end, bootstrapped from the last value
     assert returns() == pytest.approx([1 + 0.5 * 2 + 0.25 * 3 + 0.125 * 40, 2 + 0.5 * 3 + 0.25 * 40, 3 + 0.5 * 40])
@@ -211,7 +236,8 @@ def test_agent_stores_the_reward_with_the_frame_it_leads_to(agent):
     agent.observe(_outcome(_observations(2), [0.5, 0.5], [False, False], rarity=[0.5, 0.25]))
     agent.act(_observations(2))
     # Worker 0 dies, worker 1 is cut off, both continue in a new episode
-    agent.observe(_outcome(_observations(4), [-2.0, 1.0], [True, False], [False, True], 3, rarity=[0.1, 0.2]))
+    outcome = _outcome(_observations(4), [-2.0, 1.0], [True, False], [False, True], 3, [0.1, 0.2], [0.01, 0.02])
+    agent.observe(outcome)
     agent.act(_observations(4))
 
     replay = agent.replay
@@ -221,8 +247,8 @@ def test_agent_stores_the_reward_with_the_frame_it_leads_to(agent):
     assert replay.is_first[:, :4].tolist() == [[True, False, False, True]] * 2
     assert replay.is_last[:, :4].tolist() == [[False, False, True, False]] * 2
     assert replay.is_terminal[:, :4].tolist() == [[False, False, True, False], [False] * 4]
-    # Like the reward, with the frame it was reached in. A new episode's first frame has not been visited yet.
-    assert replay.rarity[:, :4] == pytest.approx(np.array([[1, 0.5, 0.1, 1], [1, 0.25, 0.2, 1]]))
+    # Like the reward, with the frame it was reached in, and for a new episode's first frame that of its place
+    assert replay.rarity[:, 1:4] == pytest.approx(np.array([[0.5, 0.1, 0.01], [0.25, 0.2, 0.02]]))
     # The model state of each step the agent acted in, none for the final frames. A fresh start's is all zeros.
     assert replay.deter[:, 1].any(-1).all() and not replay.deter[:, 2].any()
 
@@ -237,10 +263,31 @@ def test_untried_actions_are_taken_first(agent):
 
 
 def test_greedy_actions_are_not_learned_from(agent):
-    agent.act(_observations(1), greedy=True)
+    agent.act(_observations(1), Play.GREEDY)
     agent.observe(_outcome(_observations(2), [1.0, 1.0], [False, False]))
     assert len(agent.replay) == 0
     assert agent.update() == {}
+
+
+def test_sampled_actions_are_not_learned_from(agent):
+    actions = set()
+    for _ in range(10):
+        actions.update(agent.act(_observations(1), Play.SAMPLE))
+        agent.observe(_outcome(_observations(2), [1.0, 1.0], [False, False]))
+    assert len(actions) > 1
+    assert len(agent.replay) == 0
+    assert agent.update() == {}
+
+
+def test_reset_starts_new_episodes(agent):
+    agent.act(_observations(1), Play.GREEDY)
+    start = agent.state.deter.clone()
+    for value in range(2, 5):
+        agent.act(_observations(value), Play.GREEDY)
+    assert not torch.equal(agent.state.deter, start)
+    agent.reset()
+    agent.act(_observations(1), Play.GREEDY)
+    assert torch.equal(agent.state.deter, start)
 
 
 def test_trains_while_playing_and_reports_on_update(agent):
@@ -276,7 +323,6 @@ def test_update_trains_all_networks(agent):
     assert all(np.isfinite(value) for value in metrics.values())
     assert "exploration/plan2explore_reward" in metrics and "behavior/cmpo_changes" in metrics
     # Worker 0's three episodes of 10 steps and the final frame
-    assert agent.best_episodes is not None
     assert sum(len(episodes) for episodes in agent.best_episodes.episodes.values()) == 3
     changed = {name.split(".")[0] for name, p in agent.model.named_parameters() if not torch.equal(p, before[name])}
     assert changed == {
@@ -305,7 +351,7 @@ def test_cmpo_label_smoothing_pulls_up_ruled_out_actions(agent):
     gradients = {}
     for smoothing in (0.0, 0.1):
         agent.config.cmpo_label_smoothing = smoothing
-        agent._train_step(agent._sample())
+        agent._train_step(*agent._sample())
         gradients[smoothing] = agent.model.actor.out.bias.grad[0].item()
     # Every other loss changes the action's probability in proportion to it, label smoothing by smoothing / actions
     assert abs(gradients[0.0]) < 1e-12 and gradients[0.1] < -1e-4
@@ -337,8 +383,9 @@ def test_state_is_restored_with_the_experience(agent, tmp_path):
     assert replay.is_last[[0, 1], last].all()
     replay.is_last[[0, 1], last] = before.is_last[[0, 1], last]
     assert np.array_equal(replay.is_last, before.is_last)
-    (episode,) = restored.best_episodes.episodes["1-1"]
-    (original,) = agent.best_episodes.episodes["1-1"]
+    # Compared with the episodes of the same level and start power-up
+    (episode,) = restored.best_episodes.episodes["1-1 small"]
+    (original,) = agent.best_episodes.episodes["1-1 small"]
     assert np.array_equal(episode.frames, original.frames) and episode.game_reward == original.game_reward == 7.0
     assert restored.replay.sample(2)["frames"].shape[:2] == (2, 6)
 
@@ -390,3 +437,119 @@ def test_save_gif(tmp_path):
     save_gif(video, tmp_path / "preview.gif")
     image = Image.open(tmp_path / "preview.gif")
     assert image.n_frames == 2 and image.size == (6, 4)
+
+
+def test_best_episodes_learn_from_the_reward_without_the_novelty_bonus(agent):
+    rng = np.random.default_rng(5)
+    for t in range(7):
+        observations = rng.integers(0, 256, (2, 1, 8, 8, 1), dtype=np.uint8)
+        agent.act(observations)
+        done = t == 6
+        outcome = _outcome(observations, [1.5, 1.5], [done, False], final_value=3 if done else None, bonuses=[0.5, 0.5])
+        agent.observe(outcome)
+    # The bonus of a place wears off, the task's reward stays what the episode is imitated for
+    (episode,) = agent.best_episodes.episodes["1-1 small"]
+    assert episode.rewards[1:].tolist() == [1.0] * 7
+    # The replay keeps the reward the agent learns from
+    assert agent.replay.rewards[0, 1:8].tolist() == [1.5] * 7
+
+
+def test_imitates_its_best_episodes_where_they_beat_the_critic(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    torch.manual_seed(0)
+    # Self-imitation alone
+    scales = dict.fromkeys(DreamerAgentConfig.LOSSES, 0.0) | {"self_imitation": 1.0}
+    agent = DreamerAgent(tiny_config(sil_fraction=0.5, loss_scales=scales), ENV_INFO)
+    rng = np.random.default_rng(6)
+    for _ in range(10):
+        observations = rng.integers(0, 256, (2, 1, 8, 8, 1), dtype=np.uint8)
+        agent.act(observations)
+        agent.observe(_outcome(observations, [0.0, 0.0], [False, False]))
+    # An episode that pressed action 2 throughout and was paid for it
+    latent = Latent(np.zeros(agent.config.deter, np.float16), np.zeros(agent.config.stoch, np.uint8))
+    for t in range(8):
+        agent.best_episodes.add(0, np.full((8, 8, 1), t, np.uint8), 2, 10.0, 10.0, latent)
+    agent.best_episodes.finish(0, np.zeros((8, 8, 1), np.uint8), 10.0, 10.0, True, "1-1 small")
+    before = agent.model.actor.out.bias[2].item()
+    for _ in range(3):
+        agent._train_step(*agent._sample())
+    assert agent.model.actor.out.bias[2].item() > before
+
+
+def test_episodes_start_from_a_fresh_state(agent):
+    tokens = agent.model.encoder(torch.zeros(2, 8, 8, 1, dtype=torch.uint8))
+    action = torch.zeros(2, ENV_INFO.num_actions)
+    states = [agent.model.rssm.initial(2, agent.device) for _ in range(2)]
+    states[1].deter += 1.0
+    first = torch.ones(2, dtype=torch.bool)
+    with torch.no_grad():
+        deters = [agent.model.rssm.observe_step(state, action, tokens, first).deter for state in states]
+    # Whatever the state before
+    assert torch.equal(deters[0], deters[1])
+
+
+def test_kl_losses_train_the_prior_and_the_posterior_apart(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    agent = DreamerAgent(tiny_config(free_nats=0.0), ENV_INFO)
+    torch.manual_seed(1)
+    deter = torch.randn(3, agent.config.deter, requires_grad=True)
+    logits = torch.randn(3, agent.config.stoch, agent.config.classes, requires_grad=True)
+    stoch = torch.zeros(3, agent.config.stoch, agent.config.classes)
+    dynamics, representation = agent.model.rssm.kl_losses(State(deter, stoch, logits))
+    # The dynamics loss moves the prior, predicted from the deterministic state, towards the posterior
+    dynamics.sum().backward(retain_graph=True)
+    assert logits.grad is None or not logits.grad.any()
+    assert deter.grad is not None and deter.grad.any()
+    # The representation loss moves the posterior towards the prior
+    deter.grad = None
+    representation.sum().backward()
+    assert deter.grad is None or not deter.grad.any()
+    assert logits.grad is not None and logits.grad.any()
+
+
+def test_replay_takes_back_the_states_of_sampled_steps_still_stored():
+    replay = Replay(capacity=40, num_workers=2, frame_shape=(1, 1, 1), length=5, deter=2, stoch=1, seed=0)
+    _fill(replay, 0, 20)
+    batch = replay.sample(1, online=False)
+    worker, first = int(batch["worker"][0]), int(batch["first"][0])
+    deter, stoch = np.full((1, 5, 2), 7, np.float16), np.full((1, 5, 1), 3, np.uint8)
+    replay.write_latents(batch["worker"], batch["first"], deter, stoch)
+    steps = (first + np.arange(5)) % replay.size
+    assert (replay.deter[worker, steps] == 7).all() and (replay.stoch[worker, steps] == 3).all()
+
+    # Steps that were overwritten since keep the newer states
+    _fill(replay, 0, 20, start=20)
+    replay.write_latents(np.array([0]), np.array([0]), np.full((1, 5, 2), 9, np.float16), stoch)
+    assert not (replay.deter == 9).any()
+
+
+def test_best_episodes_take_back_the_states_of_sampled_steps():
+    best = BestEpisodes(num_workers=1, per_level=1, length=3, discount=0.5, deter=2, stoch=1, seed=0)
+    _finish(best, [0.0, 1.0, 2.0, 4.0], 1.0)
+    batch = best.sample(1)
+    first = int(batch["first"][0])
+    best.write_latents(
+        batch["episode"], batch["first"], np.full((1, 3, 2), 7, np.float16), np.ones((1, 3, 1), np.uint8)
+    )
+    (episode,) = best.episodes["1-3"]
+    assert (episode.deter[first : first + 3] == 7).all()
+    # An episode replaced since is left alone
+    _finish(best, [0.0, 1.0, 2.0, 4.0], 2.0)
+    best.write_latents(
+        batch["episode"], batch["first"], np.full((1, 3, 2), 9, np.float16), np.ones((1, 3, 1), np.uint8)
+    )
+    assert not any((episode.deter == 9).any() for episode in best.episodes["1-3"])
+
+
+def test_training_renews_the_stored_states(agent):
+    agent.config.train_ratio = 1.0
+    rng = np.random.default_rng(7)
+    for _ in range(13):
+        observations = rng.integers(0, 256, (2, 1, 8, 8, 1), dtype=np.uint8)
+        agent.act(observations)
+        agent.observe(_outcome(observations, rng.normal(size=2), [False, False]))
+    before = agent.replay.deter.copy()
+    agent.update()
+    # The states the updates computed are stored by the time the state of training is saved
+    agent.state_dict()
+    assert (agent.replay.deter != before).any()

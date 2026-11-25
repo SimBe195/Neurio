@@ -28,12 +28,10 @@ from agents import CHECKPOINT_PREFIX
 
 log = logging.getLogger(__name__)
 
-# Settings that do not change how the agent is trained. Schedules over all iterations still change the hash, e.g. a
-# learning rate decay over num_iters.
+# Settings that do not change how the agent is trained
 NON_TRAINING_KEYS = (
     "num_iters",
     "tags",
-    "render",
     "resume",
     "test_run_id",
     "test_iter",
@@ -42,6 +40,8 @@ NON_TRAINING_KEYS = (
     "resume_frequency",
 )
 CONFIG_HASH_TAG = "config_hash"
+# A metric of every iteration, whose last timestamp tells when a run last made progress
+LOGGED_EVERY_ITERATION = "progress/env_steps"
 RESUME_ITER_TAG = "resume_iter"
 RESUME_ARTIFACT_TAG = "resume_artifact"
 # Tags naming the best checkpoint by the curriculum's score with that score (see train.Checkpoints), and the one with
@@ -64,6 +64,8 @@ class PreviousRun:
     run_id: str
     run_name: str | None
     start_time: datetime.datetime
+    # When it last logged an iteration: a run that is still training looks like an interrupted one otherwise
+    last_logged: datetime.datetime
     # The last iteration whose state was saved
     iteration: int
     num_iters: int
@@ -83,10 +85,12 @@ def find_previous_run(experiment_id: str, cfg_hash: str, num_iters: int) -> Prev
     )
     for run in runs:
         tags = run.data.tags
-        # Runs stopped on purpose, e.g. pruned trials of a hyperparameter search, are not resumed
-        if RESUME_ITER_TAG in tags and "stopped_early" not in tags:
+        if RESUME_ITER_TAG in tags:
             start_time = datetime.datetime.fromtimestamp(run.info.start_time / 1000)
-            return PreviousRun(run.info.run_id, run.info.run_name, start_time, int(tags[RESUME_ITER_TAG]), num_iters)
+            history = mlflow.MlflowClient().get_metric_history(run.info.run_id, LOGGED_EVERY_ITERATION)
+            last_logged = datetime.datetime.fromtimestamp(max(metric.timestamp for metric in history) / 1000)
+            iteration = int(tags[RESUME_ITER_TAG])
+            return PreviousRun(run.info.run_id, run.info.run_name, start_time, last_logged, iteration, num_iters)
     return None
 
 
@@ -101,8 +105,8 @@ def decide_resume(run: PreviousRun | None, resume: bool | None, ask: Callable[[s
             log.info("No interrupted run with this config, starting a new one.")
         return None
     description = (
-        f"Run {run.run_name} ({run.run_id}) with the same config, started {run.start_time:%Y-%m-%d %H:%M}, "
-        f"stopped after iteration {run.iteration} of {run.num_iters}."
+        f"Run {run.run_name} ({run.run_id}) with the same config, started {run.start_time:%Y-%m-%d %H:%M}, saved "
+        f"after iteration {run.iteration} of {run.num_iters}, last logged {run.last_logged:%Y-%m-%d %H:%M}."
     )
     if run.finished:
         if resume:
@@ -137,7 +141,11 @@ def save_training_state(iteration: int, state: dict) -> None:
     name = RESUME_ARTIFACTS[1] if previous == RESUME_ARTIFACTS[0] else RESUME_ARTIFACTS[0]
     directory = local_artifacts(run_id)
     directory.mkdir(parents=True, exist_ok=True)
-    torch.save({"iteration": iteration, **state}, directory / name)
+    # Written beside the target and renamed over it, so that a restored state still mapped from the file, see
+    # load_training_state, keeps the old one
+    temporary = directory / f"{name}.tmp"
+    torch.save({"iteration": iteration, **state}, temporary)
+    temporary.replace(directory / name)
     mlflow.set_tags({RESUME_ARTIFACT_TAG: name, RESUME_ITER_TAG: str(iteration)})
 
 

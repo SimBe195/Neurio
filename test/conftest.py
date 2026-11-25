@@ -9,7 +9,6 @@ install_import_hook(
         "agents.ppo.self_imitation",
         "agents.ppo.actor_critic",
         "agents.ppo.impala_encoder",
-        "agents.ppo.nature_encoder",
     ],
     "beartype.beartype",
 )

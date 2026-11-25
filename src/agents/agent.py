@@ -2,6 +2,7 @@ import logging
 import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 import mlflow
@@ -9,11 +10,22 @@ import numpy as np
 import torch
 
 from config.agent import AgentConfig
-from environment import EnvironmentInfo
+from environment import EnvironmentInfo, Powerup
 
 log = logging.getLogger(__name__)
 
 CHECKPOINT_PREFIX = "checkpoint-"
+
+
+class Play(Enum):
+    """How an agent acts."""
+
+    # Samples its actions and learns from them
+    TRAIN = "train"
+    # Samples its actions without learning, to evaluate the policy as it trains
+    SAMPLE = "sample"
+    # Takes its most likely actions without learning
+    GREEDY = "greedy"
 
 
 def checkpoint_name(iteration: int) -> str:
@@ -45,19 +57,37 @@ class StepOutcome:
     truncated: np.ndarray
     # Level of each worker; for finished episodes, the level they ended on
     levels: list[str]
-    # Last observation of finished episodes, None for the other workers
-    final_observations: np.ndarray | None = None
     # The game's reward, by which episodes are compared, e.g. to keep the best ones. The agent learns from `rewards`.
-    game_rewards: np.ndarray | None = None
-    # How rarely the workers have been where they are: 1 / visits of the place, see exploration.NoveltyBonus
-    rarity: np.ndarray | None = None
+    game_rewards: np.ndarray
     # Mario's power-up at the start of each worker's episode, see environment.Powerup: episodes are only compared with
     # those of the same level and start
-    start_powerups: np.ndarray | None = None
+    start_powerups: np.ndarray
+    # Last observation of finished episodes, None while no episode finished
+    final_observations: np.ndarray | None = None
+    # How rarely the workers have been where they are: 1 / visits of the place, see exploration.NoveltyBonus. None
+    # without the bonus, e.g. when evaluating.
+    rarity: np.ndarray | None = None
+    # For workers whose episode finished, how rare the place where the next one starts is
+    first_rarity: np.ndarray | None = None
+    # The novelty bonus included in `rewards`, None without it
+    bonuses: np.ndarray | None = None
 
     @property
     def dones(self) -> np.ndarray:
         return np.logical_or(self.terminated, self.truncated)
+
+    @property
+    def task_rewards(self) -> np.ndarray:
+        """The rewards without the novelty bonus, which wears off: what the agent's best episodes are imitated for."""
+        return self.rewards if self.bonuses is None else self.rewards - self.bonuses
+
+    @property
+    def episode_groups(self) -> list[str]:
+        """Per worker, the episodes its episode is compared with: those of the same level and start, e.g. "1-2 fire"."""
+        return [
+            f"{level} {Powerup(int(powerup)).name.lower()}"
+            for level, powerup in zip(self.levels, self.start_powerups, strict=True)
+        ]
 
 
 class Agent(ABC):
@@ -66,9 +96,6 @@ class Agent(ABC):
     with `observe`. While the workers play the actions, `train_while_playing` may learn from the experience so far, and
     after a number of steps, `update` learns from the rest.
     """
-
-    # Whether the agent can learn from actions it was made to take, see `act`'s untried, instead of only its own choices
-    takes_untried_actions = True
 
     def __init__(self, config: AgentConfig, env_info: EnvironmentInfo) -> None:
         self.config = config
@@ -79,18 +106,19 @@ class Agent(ABC):
         return self.env_info.num_workers
 
     @abstractmethod
-    def act(self, observations: np.ndarray, greedy: bool = False, untried: np.ndarray | None = None) -> list[int]:
+    def act(self, observations: np.ndarray, play: Play = Play.TRAIN, untried: np.ndarray | None = None) -> list[int]:
         """
         :param observations: The current observation of each worker
-        :param greedy: Whether to take the most likely actions instead of exploring, e.g. for evaluation, which does
-            not learn from the experience
         :param untried: Per worker and action, whether the action has never been taken where the worker is, see
-            exploration.UntriedActions. A worker with any takes one of them, if `takes_untried_actions`.
+            exploration.UntriedActions. A worker with any takes one of them, in the order of its policy.
         :return: The next action of each worker
         """
 
     def observe(self, outcome: StepOutcome) -> None:
         """What the actions returned by the last `act` led to."""
+
+    def reset(self) -> None:
+        """Start new episodes on all workers, whose environments were reset."""
 
     def train_while_playing(self) -> None:
         """Learn while the workers play the actions of the last `act`, which leaves the GPU idle otherwise."""

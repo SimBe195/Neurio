@@ -24,14 +24,14 @@ def test_cells_by_area_and_position():
 
 
 def test_counts_are_shared_by_workers():
-    novelty = NoveltyBonus(ExplorationConfig(bonus_scale=1.0))
+    novelty = NoveltyBonus(ExplorationConfig(bonus_scale=1.0, cell_size=16))
     assert novelty.visit([(1, 1, 0, 40, 79), (1, 1, 0, 40, 79)]).tolist() == [1, 2]
 
 
 def test_counts_are_restored():
-    novelty = NoveltyBonus(ExplorationConfig(bonus_scale=1.0))
+    novelty = NoveltyBonus(ExplorationConfig(bonus_scale=1.0, cell_size=16))
     novelty.visit([(1, 1, 0, 40, 79)] * 3)
-    restored = NoveltyBonus(ExplorationConfig(bonus_scale=1.0))
+    restored = NoveltyBonus(ExplorationConfig(bonus_scale=1.0, cell_size=16))
     restored.load_state_dict(novelty.state_dict())
     assert restored.visit([(1, 1, 0, 40, 79)]).tolist() == [4]
 

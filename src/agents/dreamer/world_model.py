@@ -32,13 +32,18 @@ class State:
     def detach(self) -> "State":
         return self.map(torch.Tensor.detach)
 
+    def without_logits(self) -> "State":
+        return State(self.deter, self.stoch)
+
     @staticmethod
     def stack(states: list["State"], dim: int) -> "State":
+        """The states stacked, with their logits if the first one has them."""
         logits = [s.logits for s in states if s.logits is not None]
+        assert len(logits) in (0, len(states)), "Either all states have logits or none"
         return State(
             torch.stack([s.deter for s in states], dim),
             torch.stack([s.stoch for s in states], dim),
-            torch.stack(logits, dim) if len(logits) == len(states) else None,
+            torch.stack(logits, dim) if logits else None,
         )
 
 
@@ -49,7 +54,7 @@ class Encoder(nn.Module):
         super().__init__()
         layers: list[nn.Module] = []
         for depth in (config.depth * mult for mult in config.mults):
-            layers += [conv(channels, depth, config.kernel), nn.MaxPool2d(2), ChannelNorm(depth, eps=1e-4), nn.SiLU()]
+            layers += [conv(channels, depth, config.kernel), nn.MaxPool2d(2), ChannelNorm(depth), nn.SiLU()]
             channels = depth
         self.layers = nn.Sequential(*layers)
 
@@ -83,11 +88,11 @@ class Decoder(nn.Module):
             nn.SiLU(),
             Linear(2 * config.units, size),
         )
-        self.low_res_norm = ChannelNorm(self.top, eps=1e-4)
+        self.low_res_norm = ChannelNorm(self.top)
         layers: list[nn.Module] = []
         for depth, next_depth in zip(depths[::-1], depths[-2::-1], strict=False):
             layers += [nn.Upsample(scale_factor=2), conv(depth, next_depth, config.kernel)]
-            layers += [ChannelNorm(next_depth, eps=1e-4), nn.SiLU()]
+            layers += [ChannelNorm(next_depth), nn.SiLU()]
         layers += [nn.Upsample(scale_factor=2), conv(depths[0], channels, config.kernel)]
         self.layers = nn.Sequential(*layers)
 
@@ -115,7 +120,6 @@ class RSSM(nn.Module):
     def __init__(self, config: DreamerAgentConfig, token_size: int, num_actions: int) -> None:
         super().__init__()
         self.config = config
-        self.num_actions = num_actions
         deter, hidden, blocks = config.deter, config.hidden, config.blocks
         stoch_size = config.stoch * config.classes
 
@@ -139,8 +143,10 @@ class RSSM(nn.Module):
             torch.zeros(batch_size, config.stoch, config.classes, device=device),
         )
 
-    def _latent(self, logits: torch.Tensor) -> OneHotLatent:
-        return OneHotLatent(logits.unflatten(-1, (self.config.stoch, self.config.classes)), self.config.unimix)
+    def _state(self, deter: torch.Tensor, flat_logits: torch.Tensor) -> State:
+        """The state with the stochastic part sampled from the logits of all its variables."""
+        logits = flat_logits.unflatten(-1, (self.config.stoch, self.config.classes))
+        return State(deter, OneHotLatent(logits, self.config.unimix).sample(), logits)
 
     def _core(self, state: State, action: Float[torch.Tensor, "batch action"]) -> Float[torch.Tensor, "batch deter"]:
         blocks = self.config.blocks
@@ -150,6 +156,7 @@ class RSSM(nn.Module):
         x = self.gru(self.hidden(x.flatten(1))).unflatten(-1, (blocks, 3, -1))
         reset, candidate, update = (x[:, :, i].flatten(1) for i in range(3))
         candidate = torch.tanh(torch.sigmoid(reset) * candidate)
+        # Biased towards keeping the state, as in DreamerV3
         update = torch.sigmoid(update - 1)
         return update * candidate + (1 - update) * state.deter
 
@@ -164,8 +171,7 @@ class RSSM(nn.Module):
         keep = (~is_first).float().unsqueeze(-1)
         state = State(state.deter * keep, state.stoch * keep.unsqueeze(-1))
         deter = self._core(state, action * keep)
-        logits = self.posterior(torch.cat([deter, tokens], -1))
-        return State(deter, self._latent(logits).sample(), logits.unflatten(-1, (self.config.stoch, -1)))
+        return self._state(deter, self.posterior(torch.cat([deter, tokens], -1)))
 
     def observe(
         self,
@@ -185,8 +191,7 @@ class RSSM(nn.Module):
     def imagine_step(self, state: State, action: Float[torch.Tensor, "batch action"]) -> State:
         """The next state after the action, predicted without seeing the frame."""
         deter = self._core(state, action)
-        logits = self.prior(deter)
-        return State(deter, self._latent(logits).sample(), logits.unflatten(-1, (self.config.stoch, -1)))
+        return self._state(deter, self.prior(deter))
 
     def prior_logits(self, deter: Float[torch.Tensor, "*batch deter"]) -> Float[torch.Tensor, "*batch stoch classes"]:
         return self.prior(deter).unflatten(-1, (self.config.stoch, self.config.classes))

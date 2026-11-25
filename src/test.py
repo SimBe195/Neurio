@@ -3,6 +3,7 @@ import logging
 import hydra
 from omegaconf import DictConfig
 
+from agents import Play
 from evaluation import load_evaluation, play_levels
 from game_loop import GameLoop
 
@@ -23,7 +24,7 @@ def main(cfg: DictConfig) -> None:
     by default the latest one.
     """
     with load_evaluation(cfg, render_mode="human") as evaluation:
-        loop = GameLoop(evaluation.env, evaluation.agent, greedy=True)
+        loop = GameLoop(evaluation.env, evaluation.agent, play=Play.GREEDY)
         for episode in play_levels(loop, evaluation.config.levels.evaluation_levels()):
             flag = "with" if episode.flag_get else "without"
             log.info(f"{episode.level}: ended at x {episode.x_pos} after {episode.distance} px {flag} the flag.")

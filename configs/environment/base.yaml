@@ -1,19 +1,13 @@
 _target_: config.environment.EnvironmentConfig
 
-env_name: SuperMarioBros-v0
-complex_movement: True
 num_repeat_frames: 4
 # As in DreamerV3 and the Atari benchmark (Machado et al., 2018), so that the agent cannot rely on exact timing
 sticky_action_probability: 0.25
-grayscale: True
-remove_background: True
 # Cuts off the status bar at the top and part of the ground. The full width stays: with 32 pixels cut on either side,
 # the agent jumped onto 5-3's high treetops without seeing the Goombas on them, which were still right of its view.
 # The remaining 256 x 192 pixels are resized to a quarter, divisible by 16 as DreamerV3's encoder needs.
 clip_top: 33
 clip_bot: 15
-clip_left: 0
-clip_right: 0
 height: 48
 width: 64
 # Scale of all rewards, which are given in the game's units: it pays about 1 per pixel of progress and -25 for dying

@@ -15,21 +15,19 @@ def _check_levels(levels: list[str]) -> None:
     assert len(set(levels)) == len(levels), "Levels must be unique."
 
 
-def level_index(level: str) -> int:
-    """Position of a level in the order of the game, starting at 0 for 1-1."""
-    world, stage = (int(part) for part in level.split("-"))
-    return (world - 1) * 4 + (stage - 1)
-
-
 @dataclass
 class LevelConfig(ABC):
     """
-    Determines which levels the agent plays. A level is sampled at the start of each episode, which starts with small
-    Mario and ends when he dies or reaches the flag.
+    Determines which levels the agent plays. A level is sampled at the start of each episode, see
+    environment.LevelSelectEnv.
     """
 
-    # Number of most recent episodes per level whose results are reported, see level_schedulers.LevelScheduler
+    # Number of most recent episodes per level whose results count: they are reported, decide on unlocking (see
+    # CurriculumLevelsConfig) and on whether a level is stuck (see exploration.UntriedActions)
     success_window: int = field(default=50, kw_only=True)
+
+    def __post_init__(self) -> None:
+        assert self.success_window >= 1
 
     @property
     @abstractmethod
@@ -45,15 +43,12 @@ class LevelConfig(ABC):
         return self.initial_distribution()[0]
 
 
-def _uniform(levels: list[str]) -> LevelDistribution:
-    return list(levels), [1 / len(levels)] * len(levels)
-
-
 @dataclass
 class SingleLevelConfig(LevelConfig):
     level: str = "1-1"
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         _check_levels([self.level])
 
     @property
@@ -65,48 +60,27 @@ class SingleLevelConfig(LevelConfig):
 
 
 @dataclass
-class RandomLevelsConfig(LevelConfig):
-    """Each episode is played on a level drawn uniformly from the pool."""
-
-    levels: list[str] = field(default_factory=lambda: list(ALL_LEVELS))
-
-    def __post_init__(self) -> None:
-        _check_levels(self.levels)
-
-    @property
-    def name(self) -> str:
-        return f"random-{len(self.levels)}"
-
-    def initial_distribution(self) -> LevelDistribution:
-        return _uniform(self.levels)
-
-
-@dataclass
 class CurriculumLevelsConfig(LevelConfig):
     """
-    Starts with the first `initial_levels` levels and adds the next level to the pool once the agent can play the
-    pool: the flag was reached in at least `unlock_success_rate` of the last `success_window` episodes on the newest
-    level, and in at least `unlock_mean_success_rate` on average over all unlocked levels, each of which needs at least
-    `min_level_episodes` recent episodes. Levels the agent forgot therefore block progress, while a single hard level
-    does not, as long as the others are mastered.
+    Starts with the first level and adds the next one to the pool once the newest level reached its flag in any of its
+    last `success_window` episodes, and the flag was reached in at least `unlock_mean_success_rate` of the recent
+    episodes on average over all unlocked levels, each of which needs at least `min_level_episodes` of them. The
+    newest level thereby learns from its best episodes while the next ones are already played, and levels the agent
+    forgot block progress.
 
     Levels are sampled by need: the weight of a level is its failure rate, at least `min_level_weight`, and 1 for
     levels without results yet. So the agent mostly practices what it cannot do yet, including forgotten levels.
     """
 
     levels: list[str] = field(default_factory=lambda: list(ALL_LEVELS))
-    initial_levels: int = 1
-    unlock_success_rate: float = 0.5
     unlock_mean_success_rate: float = 0.5
     min_level_episodes: int = 10
     min_level_weight: float = 0.1
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         _check_levels(self.levels)
-        assert 1 <= self.initial_levels <= len(self.levels)
-        assert 0 < self.unlock_success_rate <= 1
         assert 0 < self.unlock_mean_success_rate <= 1
-        assert self.success_window >= 1
         assert 1 <= self.min_level_episodes <= self.success_window
         assert 0 < self.min_level_weight <= 1
 
@@ -115,7 +89,7 @@ class CurriculumLevelsConfig(LevelConfig):
         return f"curriculum-{len(self.levels)}"
 
     def initial_distribution(self) -> LevelDistribution:
-        return _uniform(self.levels[: self.initial_levels])
+        return [self.levels[0]], [1.0]
 
     def evaluation_levels(self) -> list[str]:
         return list(self.levels)

@@ -8,12 +8,15 @@ from jaxtyping import Float
 
 from .distributions import Bernoulli, Categorical, TwoHot, twohot_bins
 
+# 1 / the standard deviation of a unit normal truncated at ±2
+TRUNCATED_NORMAL_STD_CORRECTION = 1.1368
+
 
 def init_weight(weight: torch.Tensor, fan_in: int, scale: float = 1.0) -> None:
     """Truncated normal with the variance of a unit normal scaled by 1 / fan_in, as in DreamerV3."""
     with torch.no_grad():
         nn.init.trunc_normal_(weight, std=1.0, a=-2.0, b=2.0)
-        weight.mul_(1.1368 * math.sqrt(1 / fan_in) * scale)
+        weight.mul_(TRUNCATED_NORMAL_STD_CORRECTION * math.sqrt(1 / fan_in) * scale)
 
 
 class Linear(nn.Linear):
@@ -36,8 +39,8 @@ class BlockLinear(nn.Module):
 
     def forward(self, x: Float[torch.Tensor, "*batch features"]) -> Float[torch.Tensor, "*batch out"]:
         x = x.unflatten(-1, (self.blocks, -1))
-        x = torch.einsum("...ki,kio->...ko", x, self.weight.to(x.dtype))
-        return x.flatten(-2) + self.bias.to(x.dtype)
+        x = torch.einsum("...ki,kio->...ko", x, self.weight)
+        return x.flatten(-2) + self.bias
 
 
 class ChannelNorm(nn.Module):

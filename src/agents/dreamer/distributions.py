@@ -5,10 +5,6 @@ import torch.nn.functional as F
 from jaxtyping import Float, Int64
 
 
-def symlog(x: torch.Tensor) -> torch.Tensor:
-    return torch.sign(x) * torch.log1p(torch.abs(x))
-
-
 def symexp(x: torch.Tensor) -> torch.Tensor:
     return torch.sign(x) * torch.expm1(torch.abs(x))
 
@@ -28,15 +24,13 @@ def mix_uniform(logits: Float[torch.Tensor, "*batch classes"], unimix: float) ->
 
 
 class Categorical:
-    def __init__(self, logits: Float[torch.Tensor, "*batch classes"], unimix: float = 0.0) -> None:
-        self.logits = mix_uniform(logits, unimix) if unimix else logits.float()
+    """A categorical distribution mixed with the uniform one, see mix_uniform."""
 
-    @property
-    def log_probs(self) -> Float[torch.Tensor, "*batch classes"]:
-        return torch.log_softmax(self.logits, -1)
+    def __init__(self, logits: Float[torch.Tensor, "*batch classes"], unimix: float) -> None:
+        self.log_probs = mix_uniform(logits, unimix)
 
     def mode(self) -> Int64[torch.Tensor, "*batch"]:
-        return self.logits.argmax(-1)
+        return self.log_probs.argmax(-1)
 
     def sample(self) -> Int64[torch.Tensor, "*batch"]:
         return sample_index(self.log_probs)
@@ -63,17 +57,14 @@ class OneHotLatent:
         onehot = F.one_hot(sample_index(self.log_probs.detach()), probs.shape[-1]).to(probs.dtype)
         return onehot + probs - probs.detach()
 
-    def entropy(self) -> Float[torch.Tensor, "*batch"]:
-        return -(self.log_probs.exp() * self.log_probs).sum((-2, -1))
-
     def kl(self, other: "OneHotLatent") -> Float[torch.Tensor, "*batch"]:
         return (self.log_probs.exp() * (self.log_probs - other.log_probs)).sum((-2, -1))
 
 
-def twohot_bins(num_bins: int, device: torch.device | None = None) -> Float[torch.Tensor, " bins"]:
+def twohot_bins(num_bins: int) -> Float[torch.Tensor, " bins"]:
     """Bins spaced evenly in symlog space from -20 to 20, symmetric around an exact 0."""
     assert num_bins % 2 == 1
-    half = symexp(torch.linspace(-20, 0, (num_bins - 1) // 2 + 1, device=device))
+    half = symexp(torch.linspace(-20, 0, (num_bins - 1) // 2 + 1))
     return torch.cat([half, -half[:-1].flip(0)])
 
 

@@ -10,12 +10,12 @@ import gymnasium
 import gymnasium.logger
 import numpy as np
 import numpy.typing as npt
-from gym_super_mario_bros.actions import COMPLEX_MOVEMENT, SIMPLE_MOVEMENT
+from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
 from gym_super_mario_bros.smb_env import SuperMarioBrosEnv
 from gymnasium.core import Env, ObservationWrapper, RenderFrame, Wrapper
 from gymnasium.spaces import Box, Discrete, MultiDiscrete
 from gymnasium.vector import AsyncVectorEnv, AutoresetMode, VectorEnv
-from gymnasium.wrappers import FrameStackObservation, GrayscaleObservation, RecordEpisodeStatistics, TransformReward
+from gymnasium.wrappers import FrameStackObservation, GrayscaleObservation
 from nes_py.wrappers import JoypadSpace
 
 from config.environment import EnvironmentConfig
@@ -44,6 +44,10 @@ SCREEN_LEFT_PAGE, SCREEN_LEFT_X = 0x071A, 0x071C
 AREA_DATA = 0x00E7
 # Mario's float state: 0 on the ground, e.g. also on a block or a pipe, otherwise jumping, falling or climbing
 PLAYER_FLOAT_STATE = 0x001D
+# Mario's power-up (see Powerup) and his size: 0 big, 1 small
+POWERUP_STATE, PLAYER_SIZE = 0x0756, 0x0754
+# The game's buffer of video memory updates for the next frame, after the offset of its end
+VRAM_BUFFER_OFFSET, VRAM_BUFFER = 0x0300, 0x0301
 # Two blocks of 13 rows x 16 columns of 16 x 16-pixel metatiles, for two screens of 256 pixels of the level, from 32
 # pixels below the top of the screen. The game looks up collisions in it, and it holds only what Mario can touch.
 BLOCK_BUFFER, BLOCK_BUFFER_SIZE, BLOCK_ROWS, BLOCK_TOP = 0x0500, 0xD0, 13, 32
@@ -98,9 +102,8 @@ def on_ground(ram: npt.NDArray[np.uint8]) -> bool:
 
 class BaseEnvironment(JoypadSpace):
     """
-    This class represents the basic game environment, initialized with a certain configuration.
-    It inherits from JoypadSpace, which is a class that allows us to translate our own custom actions into sequences
-    of button presses that the NES emulator will understand.
+    One level of the game with the button combinations of gym-super-mario-bros's complex movement as actions. The frames
+    show only what Mario can touch, see remove_background.
 
     info["x_pos"] continues across the wrap of the game's 8-bit page counter: the loops of the castle mazes send Mario
     back four pages, which wraps from the first pages to the last ones and would otherwise appear as a jump of about
@@ -111,30 +114,16 @@ class BaseEnvironment(JoypadSpace):
     x position. info["on_ground"] tells whether Mario stands on something after the frame.
     """
 
-    def __init__(
-        self,
-        config: EnvironmentConfig,
-        level: str,
-        render_mode: RenderMode | None = None,
-    ) -> None:
-        """
-        Constructor for the BaseEnvironment.
-
-        :param config: Configuration for the environment
-        :param level: The specific level of the game
-        """
-        super().__init__(
-            gym_super_mario_bros.make(config.env_name.replace("Bros-v", f"Bros-{level}-v"), render_mode=render_mode),
-            COMPLEX_MOVEMENT if config.complex_movement else SIMPLE_MOVEMENT,
-        )
-        self.remove_background = config.remove_background
+    def __init__(self, level: str, render_mode: RenderMode | None = None) -> None:
+        game = gym_super_mario_bros.make(f"SuperMarioBros-{level}-v0", render_mode=render_mode)
+        assert hasattr(game.unwrapped, "layers"), "nes-py lacks the layer of each pixel, see README.md: Setup"
+        super().__init__(game, COMPLEX_MOVEMENT)
         # The game's last x position and the continued one
         self._game_x = self._x = 0
 
     def reset(self, **kwargs) -> tuple[npt.NDArray, dict]:
         observation, info = super().reset(**kwargs)
-        if self.remove_background:
-            observation = remove_background(observation, self._game.layers, self._game.ram)
+        observation = remove_background(observation, self._game.layers, self._game.ram)
         self._game_x = self._x = info["x_pos"]
         return observation, {**info, "area": area(self._game.ram), "on_ground": on_ground(self._game.ram)}
 
@@ -148,8 +137,7 @@ class BaseEnvironment(JoypadSpace):
         # The frame shows the scrolling that the RAM holds before it is emulated
         ram = np.array(self._game.ram)
         observation, reward, terminated, truncated, info = super().step(action)
-        if self.remove_background:
-            observation = remove_background(observation, self._game.layers, ram)
+        observation = remove_background(observation, self._game.layers, ram)
         self._x += x_distance(self._game_x, info["x_pos"])
         self._game_x = info["x_pos"]
         info = {**info, "x_pos": self._x, "area": area(ram), "on_ground": on_ground(self._game.ram)}
@@ -165,16 +153,15 @@ class BaseEnvironment(JoypadSpace):
         :return: Observation and info of the next frame, which shows Mario with the power-up
         """
         game = self._game
-        game.ram[0x0756] = powerup
-        # Mario's size: 0 big, 1 small
-        game.ram[0x0754] = int(powerup == Powerup.SMALL)
+        game.ram[POWERUP_STATE] = powerup
+        game.ram[PLAYER_SIZE] = int(powerup == Powerup.SMALL)
         if powerup == Powerup.FIRE:
             # The game sets fire Mario's colors when he collects the flower. Queue them in its buffer of video memory
             # updates: the palette address of Mario's sprite colors, their number, the colors and a terminator.
-            offset = int(game.ram[0x0300])
+            offset = int(game.ram[VRAM_BUFFER_OFFSET])
             update = [0x3F, 0x11, len(self.FIRE_COLORS), *self.FIRE_COLORS, 0x00]
-            game.ram[0x0301 + offset : 0x0301 + offset + len(update)] = update
-            game.ram[0x0300] = offset + len(update) - 1
+            game.ram[VRAM_BUFFER + offset : VRAM_BUFFER + offset + len(update)] = update
+            game.ram[VRAM_BUFFER_OFFSET] = offset + len(update) - 1
         # The game's reward for power-ups compares with the last state, which would reward this one
         game._status_last = game._powerup_level
         # The second frame shows Mario with the power-up
@@ -203,6 +190,7 @@ class LevelSelectEnv(gymnasium.Env):
     ) -> None:
         self.config = config
         self.render_mode = render_mode
+        # gymnasium types render_mode as any string
         self._emulator_render_mode = render_mode
         self._envs: dict[str, BaseEnvironment] = {}
         self.set_level_distribution(levels, weights)
@@ -226,7 +214,7 @@ class LevelSelectEnv(gymnasium.Env):
 
     def _get_env(self, level: str) -> BaseEnvironment:
         if level not in self._envs:
-            self._envs[level] = BaseEnvironment(self.config, level=level, render_mode=self._emulator_render_mode)
+            self._envs[level] = BaseEnvironment(level, render_mode=self._emulator_render_mode)
         return self._envs[level]
 
     def reset(self, *, seed: int | None = None, options: dict | None = None) -> tuple[npt.NDArray, dict]:
@@ -258,15 +246,6 @@ class LevelSelectEnv(gymnasium.Env):
     def close(self) -> None:
         for env in self._envs.values():
             env.close()
-
-
-def get_base_environment(
-    config: EnvironmentConfig,
-    levels: LevelConfig,
-    render_mode: RenderMode | None = None,
-) -> Env:
-    """Create the unprocessed game environment for the given level configuration."""
-    return LevelSelectEnv(config, *levels.initial_distribution(), render_mode=render_mode)
 
 
 class GameViewerWrapper(Wrapper):
@@ -314,53 +293,18 @@ class GameViewerWrapper(Wrapper):
 
 
 class ClipWrapper(ObservationWrapper):
-    """
-    This class represents a wrapper for the game environment that clips the observations from the game to a certain size
-    """
+    """Cuts off the configured rows at the top and the bottom of the frames, e.g. the status bar."""
 
-    def __init__(self, config: EnvironmentConfig, env: Env, **_) -> None:
-        """
-        Constructor for the ClipWrapper.
-
-        :param config: Environment configuration
-        :param env: The environment to be wrapped
-        :param kwargs: Additional arguments
-        """
+    def __init__(self, config: EnvironmentConfig, env: Env) -> None:
         super().__init__(env)
-
-        self.clip_top = config.clip_top
-        self.clip_bot = config.clip_bot
-        self.clip_left = config.clip_left
-        self.clip_right = config.clip_right
-
-        self.new_width = BASE_WIDTH - self.clip_left - self.clip_right
-        self.new_height = BASE_HEIGHT - self.clip_top - self.clip_bot
-
-        obs_shape = self.observation_space.shape
-        if obs_shape is None:
-            obs_shape = (self.new_height, self.new_width)
-        else:
-            obs_shape = (self.new_height, self.new_width, *obs_shape[2:])
-
-        self.observation_space = Box(
-            low=0,
-            high=255,
-            shape=obs_shape,
-            dtype=np.uint8,
-        )
+        self.clip_top, self.clip_bot = config.clip_top, config.clip_bot
+        shape = self.observation_space.shape
+        assert shape is not None
+        height = BASE_HEIGHT - self.clip_top - self.clip_bot
+        self.observation_space = Box(low=0, high=255, shape=(height, *shape[1:]), dtype=np.uint8)
 
     def observation(self, observation: npt.NDArray) -> npt.NDArray:
-        """
-        Clip the observation based on the pre-configured settings.
-
-        :param observation: The original observation
-        :return: The clipped observation
-        """
-        return observation[
-            self.clip_top : -self.clip_bot if self.clip_bot else None,
-            self.clip_left : -self.clip_right if self.clip_right else None,
-            ...,
-        ]
+        return observation[self.clip_top : BASE_HEIGHT - self.clip_bot]
 
 
 class ResizeWrapper(ObservationWrapper):
@@ -381,17 +325,20 @@ class ResizeWrapper(ObservationWrapper):
 
 
 class FlagRewardWrapper(Wrapper):
-    """Replaces the game's reward for reaching the flag with the configured one, for the episode scores."""
+    """
+    The game's reward without its clipping of each frame's to ±15, with the configured reward for reaching the flag
+    instead of the game's. Passed on as info["game_reward"] by ProgressShaping, it ranks the agent's best episodes: it
+    pays for progress, score, coins and power-ups and costs time and dying.
+    """
 
     def __init__(self, config: EnvironmentConfig, env: Env) -> None:
         super().__init__(env)
         self.flag_reward = config.flag_reward
 
     def step(self, action: int) -> StepType:
-        state, reward, terminated, truncated, info = super().step(action)
+        state, _, terminated, truncated, info = super().step(action)
         completion = info["reward_components"]["completion"]
-        if completion:
-            reward = float(reward) - completion + self.flag_reward
+        reward = info["reward_total_unclipped"] - completion + (self.flag_reward if completion else 0.0)
         return state, reward, terminated, truncated, info
 
 
@@ -437,7 +384,6 @@ class NoProgressTruncation(Wrapper):
 
     def __init__(self, config: EnvironmentConfig, env: Env) -> None:
         super().__init__(env)
-        assert config.max_steps_without_progress is not None
         self.max_steps = config.max_steps_without_progress
         self._area: tuple[int, int, int] | None = None
         self._max_x = 0
@@ -492,7 +438,7 @@ class ProgressShaping(Wrapper):
     info["distance"] is the progress of the episode so far as it is rewarded: the changes of x within each area. Unlike
     the x position, it does not drop when Mario gets further through a pipe into another area.
 
-    The wrapped environment's reward, the game's, is passed on as info["game_reward"]: it scores the episodes.
+    The wrapped environment's reward, the game's, is passed on as info["game_reward"], see FlagRewardWrapper.
     """
 
     def __init__(self, config: EnvironmentConfig, env: Env) -> None:
@@ -503,13 +449,11 @@ class ProgressShaping(Wrapper):
         self.progress_reward = config.progress_reward
         self._place: tuple[int, int, int] = (0, 0, 0)
         self._x = 0
-        self._flags: set[tuple[int, int]] = set()
         self._distance = 0
 
     def reset(self, **kwargs) -> tuple[Any, dict[str, Any]]:
         observation, info = super().reset(**kwargs)
         self._place, self._x = (info["world"], info["stage"], info["area"]), info["x_pos"]
-        self._flags = set()
         self._distance = 0
         return observation, {**info, "distance": 0}
 
@@ -521,9 +465,8 @@ class ProgressShaping(Wrapper):
         reward = self.progress_reward * progress
         left_level = place[:2] != self._place[:2]
         self._place, self._x = place, info["x_pos"]
-        # The flag counts once per level, the game reports it during the whole flagpole slide
-        if info["flag_get"] and place[:2] not in self._flags:
-            self._flags.add(place[:2])
+        # The game ends the episode at the flag
+        if info["flag_get"]:
             reward += self.flag_reward
         elif terminated and not info["flag_get"] and not left_level:
             reward -= self.death_penalty
@@ -538,31 +481,22 @@ def get_environment(
     render_mode: RenderMode | None = None,
 ) -> Env:
     """
-    Set up the game environment with the given configuration.
-    This includes several wrappers for preprocessing observations, actions and rewards.
+    The game on the levels' initial distribution, with grayscale frames cut and resized, repeated actions and the
+    shaped reward.
 
-    :param config: Configuration for the environment
-    :param levels: Configuration of the levels to play
     :param stack_frames: Number of most recent frames in each observation, see AgentConfig.stack_frames
-    :param render_mode: See RenderMode
-    :return: The wrapped environment
     """
-    if render_mode == "human":
-        env = GameViewerWrapper(get_base_environment(config, levels, render_mode="rgb_array"))
-    else:
-        env = get_base_environment(config, levels, render_mode=render_mode)
-    if config.grayscale:
-        env = GrayscaleObservation(env, keep_dim=True)
+    # The viewer shows the frames rendered as arrays, see GameViewerWrapper
+    emulator_render_mode = "rgb_array" if render_mode is not None else None
+    base = LevelSelectEnv(config, *levels.initial_distribution(), render_mode=emulator_render_mode)
+    env: Env = GameViewerWrapper(base) if render_mode == "human" else base
+    env = GrayscaleObservation(env, keep_dim=True)
     env = ClipWrapper(config, env)
     env = ResizeWrapper(config, env)
     env = FlagRewardWrapper(config, env)
-    env = TransformReward(env, lambda reward: float(reward) * config.reward_scale)
     env = ActionRepeatWrapper(config, env)
     env = LevelExitTermination(env)
-    if config.max_steps_without_progress is not None:
-        env = NoProgressTruncation(config, env)
-    # The episode statistics sum the game's reward, the agent learns from the shaped one
-    env = RecordEpisodeStatistics(env)
+    env = NoProgressTruncation(config, env)
     env = ProgressShaping(config, env)
     return FrameStackObservation(env, stack_frames)
 
@@ -597,12 +531,7 @@ class EnvironmentInfo:
 
 
 def get_env_info(env: Env | VectorEnv) -> EnvironmentInfo:
-    """
-    Get information about the game environment.
-
-    :param env: The environment to get information from
-    :return: An EnvironmentInfo object with details about the environment
-    """
+    """The sizes of the environment's observations and actions."""
     obs_space = env.observation_space.shape
     assert obs_space is not None, "Observation space is None."
     assert len(obs_space) >= 3, "Observation space dimensions are not sufficient."

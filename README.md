@@ -1,198 +1,256 @@
 # Neurio
 
-A reinforcement learning agent that learns to play Super Mario Bros from the screen, with PPO or DreamerV3. The goal is
-an agent that gets good at the game on its own: no human demonstrations and no level-specific scripting.
+A reinforcement learning agent that learns to play all 32 levels of Super Mario Bros from the screen, with DreamerV3 or,
+as a baseline, PPO. The agent learns on its own: no human demonstrations, no restarts from saved states and no
+level-specific scripting.
 
-## Approach
+## Environment
 
-**Environment.** [gym-super-mario-bros](https://github.com/Kautenja/gym-super-mario-bros) emulates the NES game through
-[gymnasium](https://gymnasium.farama.org). 32 copies run in parallel worker processes. Each observation is processed as
-follows:
+[gym-super-mario-bros](https://github.com/Kautenja/gym-super-mario-bros) emulates the NES game through
+[gymnasium](https://gymnasium.farama.org); 32 copies run in parallel worker processes (`src/environment.py`).
 
-- everything Mario cannot touch, such as the sky, hills, bushes and clouds, painted black (`environment.remove_background`).
-  The game's RAM holds the grid of 16×16-pixel blocks in which it looks up collisions, and the emulator tells which
-  pixels are sprites, e.g. Mario, enemies and moving platforms. Everything else is background.
-- converted to grayscale
-- cropped to 256×192 pixels, without the score bar and part of the ground
-- resized to 64×48 pixels, a quarter
+**Observations.** Each frame is processed as follows:
 
-The full width stays: with 32 pixels cut on either side, the agent saw about 112 instead of 144 pixels ahead of Mario,
-and on 5-3 it jumped onto narrow treetops whose Goombas were still right of its view, its most frequent death there.
-- for PPO, stacked with the previous 3 frames, so that it can see motion
+- Everything Mario cannot touch, such as the sky, hills, bushes and clouds, is painted black (`remove_background`). The
+  game's RAM holds the grid of 16×16-pixel blocks in which it looks up collisions, and the patched emulator tells which
+  pixels are sprites, e.g. Mario, enemies and moving platforms. The agent thus sees what matters for
+  playing, the same way on every level.
+- Converted to grayscale and cropped to 256×192 pixels, without the status bar and part of the ground. The full width
+  stays: with 32 pixels cut on either side, the agent jumped onto 5-3's narrow treetops without seeing the Goombas on
+  them.
+- Resized to 64×48 pixels, a quarter. PPO, which has no memory, sees the last 4 frames to perceive motion.
 
-Each chosen action is held for 4 frames. The agent picks from the 12 button combinations of `COMPLEX_MOVEMENT`.
+**Actions.** The agent picks from the 12 button combinations of `COMPLEX_MOVEMENT`; each is held for 4 frames. Each frame
+keeps the previous frame's action with probability 0.25 (sticky actions, as in DreamerV3's Atari setting,
+[Machado et al., 2018](https://arxiv.org/abs/1709.06009)), and each episode starts with a random action for 0–3 frames.
+Otherwise every episode on a level plays out in exactly the same timing, and the agent could learn one exact course that
+fails when it arrives a few frames off. Evaluation plays without sticky actions.
 
-Each episode plays one level from its start and ends when Mario dies, reaches the flag or is cut off. Mario starts 1-1
-small, like the game, and every later level as he left the previous one in game order: small, big or with the fire
-flower, as often as the previous level's episodes reached the flag in each state during the last 1000 iterations
-(`resume_frequency`, so that each period is saved complete; `powerups.StartPowerups`). Training thus practices the
-starts that the agent's own play leads to, and evaluation, which carries Mario's state from level to level like the
-game, meets the same ones. It starts with a random action for 0–3 frames, one less than an action is held, and
-each frame keeps the previous frame's action with probability 0.25 (`environment.sticky_action_probability`), as in
-DreamerV3's Atari setting ([Machado et al., 2018](https://arxiv.org/abs/1709.06009)). `test.py` plays without sticky
-actions.
-Otherwise every episode on a level would play out in exactly the same timing, and the agent could learn one exact course
-that fails when it arrives a few frames off.
+**Episodes.** Each episode plays one level from its start until Mario dies, reaches the flag, leaves the level or is cut
+off. Mario starts 1-1 small, like the game, and every later level as he left the previous one: small, big or with the
+fire flower, as often as the previous level's episodes reached its flag in each state during the last 1000 iterations
+(`powerups.StartPowerups`). Training thus practises the starts that the agent's own play leads to, and evaluation, which
+carries Mario's state from level to level like the game, meets the same ones.
 
-**Reward.** The agent learns from progress to the right (0.25 per pixel), reaching the flag (500) and dying (−50), all
-scaled by 0.1 (`environment.progress_reward`, `flag_reward`, `death_penalty`, `reward_scale`). Changing the area through
-a pipe or to the next level is not counted as progress. The area is the address of the part of the level the game has
-loaded: the area number of gym-super-mario-bros stays the same in the rooms behind pipes, which made going down 1-1's
-pipe look like a step back by about 900 pixels. With the game's own reward, which pays 1 per pixel and −25 for
-dying, the agent learnt to take dead ends that pay more than they cost: on 1-3 it jumped into the pit before the tall
-tree with two Goombas, since falling forward paid about 15 and dying cost 2.5. With dying at −100, DreamerV3 learnt to
-clear 1-3, which it never did with the game's reward, but unlocked 1-2 and 1-3 at half the pace; −50 is in between.
+**Reward** (`environment.ProgressShaping`). The agent learns from progress to the right (0.25 per pixel), reaching the
+flag (500) and dying (−50), all scaled by 0.1. With the game's own reward (1 per pixel, −25 for dying, each frame's clipped to ±15), dead ends paid
+more than they cost: on 1-3 the agent jumped into a pit, since falling forward paid more than dying cost. The flag pays
+as much as 2000 pixels of progress, so that no dead end further right pays more than finishing, e.g. waiting in 1-2's
+warp zone until the time runs out.
 
-Two stricter variants failed. Potential-based shaping with the progress as potential
-([Ng et al., 1999](https://people.eecs.berkeley.edu/~pabbeel/cs287-fa09/readings/NgHaradaRussell-shaping-ICML1999.pdf))
-makes the return from a state mostly minus the progress made so far, whatever the agent does next; Dreamer normalizes
-advantages by the spread of returns, which then came mostly from how far Mario was, and learnt 1-1 several times
-slower. Giving back all progress of the level on dying made deaths cost more the further Mario got, almost as much as
-the flag at x ≈ 1150 of 1-3, while waiting cost nothing: in 40% of the episodes on 1-3, Mario stood on a platform until
-the episode was truncated for lack of progress.
+- Changing the area, e.g. through a pipe, is not counted as progress. The area is the address of the part of the level
+  the game has loaded; gym-super-mario-bros's area number stays the same in the rooms behind pipes, which made going
+  down 1-1's pipe look like a step back by 900 pixels.
+- Leaving the level other than by its flag, i.e. through a warp pipe, ends the episode as not cleared, without reward or
+  penalty. Otherwise the levels the pipe leads to pay more than the level's own flag, and on 4-2 the agent took the warp
+  zone in every greedy episode.
+- An episode is truncated after 150 steps without getting further right, so that dead ends do not fill the training
+  with waiting. Truncated, not ended: the agent learns from the value of the last state as if the episode went on.
 
-The flag pays 500 instead of the game's 50, as much as 50 pixels of progress, so that dead ends further to the right do
-not pay more than finishing: in 1-2 the agent ran over the ceiling past the exit pipe into the warp zone and waited
-there until the time ran out.
+The game's own reward, which also pays for score, coins and power-ups, only ranks the agent's best episodes for
+self-imitation, with the flag counted as 500.
 
-Leaving the level other than by its flag, i.e. through a warp pipe, ends the episode as not cleared, without reward or
-penalty. The game would continue in the level the pipe leads to, whose progress and flag paid more than the level's own
-flag: on 4-2, the agent took the warp zone to world 5 in every greedy episode, and 4-2 only counted as cleared with 5-1.
+## Exploration
 
-For PPO, the reward is divided by the running standard deviation of the discounted return,
-as in Stable-Baselines3 and CleanRL. Without it, gamma 0.98 and the larger flag reward made the critic's loss about 6
-times larger. It outweighed the policy in the shared network, the policy became almost deterministic, and the agent
-ended up standing in front of the first pipe of 1-1 until the time ran out.
+Three mechanisms help the agent find what it would rarely find by chance (`src/exploration.py`). The replay of rare
+steps is DreamerV3's; both agents get the others.
 
-An episode is truncated after 150 steps without a new furthest position (`environment.max_steps_without_progress`;
-entering another area counts as progress), so that dead ends do not fill the training with thousands of steps of
-waiting. Truncated, not ended as a death: the agent learns from the value of the last state as if the episode went on,
-so waiting costs what it costs in the game.
+**Novelty bonus.** Each step's reward gets `1 / sqrt(visits)`, where visits counts how often any worker has been in
+Mario's 16×16-pixel cell of the area. A new cell outweighs the progress lost by stepping left instead of right until
+about 10 visits. In the maze of 4-4 the way on is a one-tile hole that is only reached by walking back to the left;
+with a bonus of 0.1 the agent came within a cell of it but never stepped in, with 1.0 it found it.
 
-**Agents** (`agent=...`) all act on the same interface (`src/agents/agent.py`): `act` picks the next actions,
-`observe` gets what they led to, and `update` learns after each iteration.
+**Replay of rare steps.** Half of DreamerV3's replayed sequences are sampled around a step picked by its rarity,
+`1 / visits` of its cell when it was reached; an episode's first frame has the rarity of its start, which is among the
+most visited cells. The few safe landings through 4-4's hole were otherwise a handful of steps among a million in the
+replay.
 
-**PPO** (`agent=ppo`, default) with generalized advantage estimation (GAE) and gamma 0.98, so that the flag still counts
-about 40 steps ahead, where the route to it is decided. The IMPALA residual encoder (3 stages with 32/64/64 channels and
-a 256-unit layer) reads the frames; it generalizes better to unseen levels than the DQN encoder ("Nature CNN",
-`agent/model=nature`). On the GPU the encoder runs in bfloat16. Together with an embedding of
-the previous action, it feeds two outputs: action logits (the actor) and a state value (the critic). Each iteration
-collects 128 steps per worker and trains 5 epochs on them. Advantages are normalized per minibatch. The entropy bonus
-decays from 0.013 to 0.001 over the first 700 iterations (`agent.entropy_decay_updates`), as long as in the tuning runs.
-Spread over a long run instead, it kept the policy so random that its own best episodes drifted out of reach.
+**Untried actions at walls.** The actor generalizes across places: an action that is useless almost everywhere, like
+pressing down, becomes unlikely also where it has never been tried. On 8-4, the only way on is down a pipe floating
+above the ground, and a run took 21,000 iterations after unlocking 8-4 to press down on it. A level is stuck at a wall
+once 50 episodes in a row (`levels.success_window`) neither reached the flag nor got a cell further than any before.
+Then a worker within a window of distance before the wall takes an action that has never been taken in its cell, on the
+ground or in the air, like UCB1 plays every arm once; the policy decides their order. The window starts at the wall and
+moves back a cell after every iteration that found nothing untried in it, until the way on is found, e.g. the pipe
+before 8-4's loop. Progress past the wall closes it. Elsewhere the policy acts as usual: taking every untried action in
+every new cell made the agent find the flags of new levels 3 to 10 times later, since at the frontier Mario hardly got
+further.
 
-**DreamerV3** (`agent=dreamer`, [Hafner et al.](https://danijar.com/project/dreamerv3/)), reimplemented in PyTorch
-from the [official JAX code](https://github.com/danijar/dreamerv3), with its 12M parameter model and settings. It
-learns a world model of the game from replayed sequences of its own play: a recurrent state that is inferred from the
-frames, predicts the next state for each action, and from it the frame, the reward and whether the episode goes on.
-The actor and critic learn only from rollouts of 15 steps that the world model imagines from replayed states, so the
-agent can practise a jump many times without playing it. Returns are scaled by their 5th to 95th percentile range,
-rewards and values are learned as distributions over exponentially spaced bins, so no reward scale needs tuning.
+## Curriculum
 
-Two additions let it learn moves that rarely happen by chance, like the long jump onto the tall tree of 1-3, which needs
-A held for about 7 steps. Without them, it died at the same pit for 4M steps:
+The levels are unlocked in game order (`levels=curriculum`, `src/level_schedulers.py`). The next level is unlocked once
+the newest one reached its flag in any of its last 50 episodes, and the success rate averaged over all unlocked levels
+is at least 50%. A newly reached level then becomes reliable while the next ones are already played: waiting for 50% on
+each new level spent about 27,000 of the 38,000 iterations until 8-4 was unlocked on these climbs, one after the other.
+The average keeps the pool from filling up with levels that are not learned yet; unlocking all 32 levels at once learned
+far slower than the curriculum. Episodes are sampled by need: each level's weight is its failure rate, at least 0.1, so
+the agent mostly practises what it cannot do yet, including what it forgot.
 
-- **Self-imitation:** an eighth of each batch (`agent.sil_fraction`) comes from its 8 best episodes per level (by game
-  reward, `agent.sil_episodes_per_level`). The world model thereby learns a rare success from
-  more than one sequence among a million, and the actor imitates the actions of these episodes where their return
-  beats the critic.
-- **Plan2Explore** ([Sekar et al., 2020](https://ramanans1.github.io/plan2explore/)): an ensemble of 8 heads predicts
-  the next state from each state and action. Where they disagree, the world model has not learned yet what happens, and
-  this disagreement is rewarded in imagination, so that the actor plans towards it. It has its own critic and return
-  scale, normalized without the floor of 1 that keeps small differences in rare rewards from being magnified, and
-  counts with a weight of 0.1 (`agent.exploration_weight`) against the reward.
+## Agents
 
-Plan2Explore cannot find places the world model has never seen: in the maze of 4-4, the agent took the middle corridor
-at the second fork for over 2,000 iterations, while only the bottom one leads on. Its entrance is a one-tile hole that
-is only reached by walking back to the left from where Mario drops into the middle corridor. A **novelty bonus**
-(`exploration.bonus_scale`, for any agent) therefore adds `1 / sqrt(visits)` to each step's reward, where visits counts
-how often any worker has been in Mario's 16×16-pixel cell of the area; the world model learns it as part of the reward.
-A new cell outweighs the progress lost by stepping left instead of right until about 10 visits. At 0.1, the agent came
-within one cell of the hole but never stepped into it. Replacing up to 20% of the actions on a stalled level with
-random ones did not help either: they never add up to walking back that far.
+All agents act on the same interface (`src/agents/agent.py`): `act` picks the next actions, `observe` gets what they led
+to, and `update` learns after each iteration.
 
-At 1.0, Mario found the hole about 25 times in 500 iterations, but mostly died: under it is open space over lava, and
-he only lands on the bottom floor by letting go of left within two steps. The few safe landings were a handful of steps
-among the million in the replay. Half of the replayed sequences (`agent.rare_fraction`) are therefore sampled around a
-step picked with probability by its **rarity**, `1 / visits` of its cell when it was reached, so that rare experience is
-replayed far more often than uniformly; without the novelty bonus, all steps are equally rare.
+### DreamerV3
 
-Neither helps with an action that is useless almost everywhere, e.g. pressing down: the actor generalizes across places
-and rules it out everywhere, also where it has never been tried, and the world model confidently predicts that Mario
-only crouches. On 8-4, the only way on is down a pipe floating above the ground. One run first pressed down on it about
-21,000 iterations after unlocking 8-4, the next had not after 9,000. While training, a worker on a level that is
-**stuck at a wall** therefore takes an **untried action** (`exploration.try_all_actions`) while there is one in Mario's
-cell, the novelty bonus's, apart for Mario on the ground and in the air, like UCB1 plays every arm once. Which of them
-comes first is sampled from the policy. A level is stuck once `levels.success_window` episodes in a row neither reached
-the flag nor got further than before. The untried actions are only taken in a window of distance up to the wall, which
-starts at the wall and moves back after every iteration that found nothing untried in it, also when no episode got
-that far, until the way on is found, e.g. the pipe before 8-4's loop. Elsewhere the policy acts as usual: one run that
-tried every action in every cell found the flags of new levels 3 to 10 times later, because at the frontier Mario
-hardly got further. The actor still
-learns in imagination, from the world model, which learns from every action taken; CMPO then values pressing down on the
-pipe like any other action. PPO learns on-policy and does without it.
+`agent=dreamer` (default), [Hafner et al., 2023](https://danijar.com/project/dreamerv3/), reimplemented in PyTorch from
+the [official JAX code](https://github.com/danijar/dreamerv3) with its 12M parameter model and settings
+(`src/agents/dreamer/`). It learns a world model from replayed sequences of its own play: a recurrent state, inferred
+from the frames, that predicts the next state for each action and from it the frame, the reward and whether the episode
+goes on. The actor and critic learn from 15-step rollouts that the world model imagines from replayed states, so the
+agent can practise a jump many times without playing it.
 
-Differences to the original:
+Additions, for moves that rarely happen by chance. Without the first two, the agent died at 1-3's tall tree, which needs
+the jump button held for about 7 steps, for 4M steps:
 
-- The replay keeps the last 1M steps instead of 5M, about 6.5 GB with the model state of each step.
-- Plan2Explore's reward is added to the task reward of one actor, instead of training a separate exploration actor.
-- The actor is also regularized towards Muesli's clipped MPO policy ([Hessel et al., 2021](https://arxiv.org/abs/2104.06159)):
-  its policy times exp(advantage), with the advantages of all actions of each replayed state valued one imagined step
-  ahead (reward plus critic value), normalized like the returns and clipped to ±1 (`agent.loss_scales.cmpo`), so that
-  it also learns of better actions it rarely samples. Unlike Muesli, the prior is the current policy instead of a
-  target network, the target is label smoothed by 3e-5 (`agent.cmpo_label_smoothing`), and the advantages include
-  Plan2Explore's like those of the policy gradient: the actor also tries actions whose outcome the world model is
-  unsure about. On 8-4 the agent learnt to jump onto the ledge of the second right pipe, but never pressed down there:
-  the novelty bonus of the ledge wore off with every visit, while the disagreement about pressing down only goes once
-  it has been tried. It costs about 18% of an update.
+- **Self-imitation** ([Oh et al., 2018](https://arxiv.org/abs/1806.05635)): an eighth of each batch comes from the
+  agent's 8 best episodes per level and start power-up. The world model learns a rare success from more than one
+  sequence among a million, and the actor imitates its actions where their return beats the critic. The episodes keep
+  the reward without the novelty bonus, which wears off, so that a success stays worth what it is to the task.
+- **Plan2Explore** ([Sekar et al., 2020](https://ramanans1.github.io/plan2explore/)): an ensemble of 8 heads predicts the
+  next state from each state and action. Their disagreement, where the world model has not learned yet what happens, is
+  rewarded in imagination with a weight of 0.1 against the task, so that the actor plans towards it. It is added to the
+  one actor's advantages instead of training a separate exploration actor.
+- **CMPO** ([Hessel et al., 2021](https://arxiv.org/abs/2104.06159)): the actor is also pulled towards its policy times
+  exp(advantage), with the advantages of all actions of each replayed state valued one imagined step ahead and clipped
+  to ±1, so that it learns of better actions it rarely samples. The prior is the current policy instead of Muesli's
+  target network. The target is label smoothed by 3e-5: the policy underneath the 1% uniform mixture with which actions
+  are sampled had become deterministic, pressing down on 8-4's pipe with a probability of 1e-28, and every other loss
+  changes an action's probability in proportion to it. Smoothing by 3e-4 doubled the entropy.
 
-  Both work on the actor's own policy, before the 1% uniform mixture with which actions are sampled. That policy had
-  become deterministic underneath the mixture: on 8-4 it pressed down on the first pipe with a probability of 1e-28,
-  while the world model valued that action at 29–123 against 21 for every other. The entropy bonus, like CMPO and the
-  policy gradient, changes an action's probability in proportion to it, so nothing could raise it again; label
-  smoothing pulls by a constant smoothing / 12 (the difference between label smoothing and a confidence penalty,
-  [Pereyra et al., 2017](https://arxiv.org/abs/1701.06548)). A first version took the acting policy, with its uniform
-  mixture, as the prior: in effect label smoothing by 1%, which made the policy almost random within 1000 updates.
-  Smoothing by 3e-4 raised the probability of down on 8-4's pipe from 1e-28 within a few hundred iterations, so that
-  the agent took the pipe, but also doubled the entropy: where actions are of about equal value, the pull towards
-  uniform is all that moves the policy, and the optimizer, which normalizes each weight's updates, moves it fast however
-  weak it is. In about a tenth of the states 10-20% of the probability spread over other actions.
+The replay keeps the last 1M steps instead of 5M. Each replayed sequence continues from the model state of the step
+before it, as stored; training writes back the states it computes for the replayed steps, so that the stored ones stay
+those of the current model. The best episodes may be kept for the whole run, and their states would otherwise be those
+of a model from tens of thousands of updates before. The updates owed to each step run while the workers play it: with 32
+replays per step, one update of 16 sequences of 64 steps per step of the 32 workers. An iteration of 128 steps takes
+about 11.4 s on an RTX 4090, after compiling the networks for a few minutes at the start.
 
-The updates owed to each step run while the workers play it, as in the original. With the default 32 replays per
-step, that is one update of 16 sequences of 64 steps per step of the 32 workers, and an iteration of 128 steps takes
-about 10.5 s on an RTX 4090 at 48×48 frames (64×48 makes an update about 9% slower), after compiling the networks for about 2.5 minutes at the start. The
-updates take about 8 s of it. Fewer than one update per step overlaps worse: with 24 workers, 512 steps per iteration
-and 10.67 replays per step, the same 128 updates took 15.5 s, since the next action waits for each update.
+### PPO
 
-**Self-imitation** (PPO; DreamerV3 above). `agent.sil_loss_weight` (default 0.7, 0 disables it): the agent keeps its
-own 5 best episodes per level (by game reward, `agent.sil_episodes_per_level`) and, after each update, imitates their
-actions wherever their return beats its current value estimate, so that it learns a better route it found by chance
-before it commits to a worse one.
+`agent=ppo`, a baseline ([Schulman et al., 2017](https://arxiv.org/abs/1707.06347), `src/agents/ppo/`) with
+generalized advantage estimation and gamma 0.98, so that the flag still counts about 40 steps ahead. The IMPALA residual
+encoder ([Espeholt et al., 2018](https://arxiv.org/abs/1802.01561)), twice as wide as the original, reads the stacked
+frames; together with an embedding of the previous action it feeds the action logits and the state value. Each
+iteration trains 5 epochs on the 128 steps of each worker.
 
-**Levels** (`levels=...`):
+- The reward is divided by the running standard deviation of the discounted return, as in Stable-Baselines3 and
+  CleanRL. Without it, the critic's loss outweighed the policy in the shared network, and the agent ended up standing
+  in front of 1-1's first pipe.
+- The entropy bonus decays from 0.013 to 0.001 over the first 700 updates. Spread over a long run instead, it kept the
+  policy so random that its own best episodes drifted out of reach.
+- Self-imitation: the agent keeps its 5 best episodes per level and start power-up and after each update imitates
+  their actions wherever their return beats its value estimate, with the reward without the novelty bonus.
+- Like DreamerV3, it samples actions from its policy mixed with 1% of the uniform distribution, and takes untried
+  actions at walls. These are off-policy for PPO: it learns from them with its policy's probability of them, which its
+  clipping bounds, while self-imitation learns from an episode that got through without that restriction.
 
-| Mode | Behaviour |
-|---|---|
-| `single` | one level, e.g. `levels.level=4-4` |
-| `random` | each episode on a random level from a list |
-| `curriculum` (default) | starts on 1-1 and unlocks the next level once the agent reached the flag on the newest level and the average success over all unlocked levels is 50%. Levels are sampled by failure rate, so forgotten levels get practiced again. |
-| `tuning` | for hyperparameter search: `curriculum` over 1-1, 1-3, 2-2 and 4-1, each with a different mechanic |
+## Results
 
-**Tracking.** Each training run is an [MLflow](https://mlflow.org) run in `mlflow.db`. It stores the resolved config
-(`config.yaml`), the parameters, metrics per iteration (see [Dashboards](#dashboards)) and model checkpoints.
+Both agents trained on the curriculum for 30,000 iterations (123M steps) on an RTX 4090. PPO's iterations are faster,
+so it trained for 28.6 hours to DreamerV3's 95.8:
+
+| | DreamerV3, 28.6 h (iteration 8,991) | DreamerV3, 30,000 iterations | PPO, 30,000 iterations |
+|---|--:|--:|--:|
+| Levels unlocked | 28 | 32 | 9 |
+| Sum of training success rates | 13.2 | 23.6 | 3.6 |
+| Most levels cleared in one greedy go, up to then | 11 | 32 | 8 |
+
+The sums of success rates are means over the last 250 iterations up to that point.
+
+### DreamerV3
+
+
+- All 32 levels were unlocked at iteration 12,914 (41.1 h). 8-4 took by far the longest to its first flag, 3,482
+  iterations: its way on is down a pipe that the agent had to try first, see untried actions above. No other level took
+  more than 857.
+- The first greedy go through all 32 levels, from small Mario in 1-1 to 8-4's flag, came at checkpoint 27,300, after
+  86.9 hours of training; 27,500 did it too. A greedy go is fragile: the checkpoints from 27,000 to 30,000 cleared a
+  median of 8 levels in a row.
+- The final checkpoint's success rates per level, measured with `sampled_success.py` (1024 episodes per level, from
+  small Mario, standard error at most 1.6 percentage points), average 79%. Its weakest level is 5-3 at 32%, whose
+  Bullet Bills fire at random.
+
+| Level | Unlocked at | First flag at | Iterations to first flag | Success |
+|---|--:|--:|--:|--:|
+| 1-1 | 0 | 125 | 125 (0.4 h) | 94% |
+| 1-2 | 415 | 673 | 258 (0.8 h) | 88% |
+| 1-3 | 1,009 | 1,108 | 99 (0.3 h) | 85% |
+| 1-4 | 1,248 | 1,375 | 127 (0.4 h) | 83% |
+| 2-1 | 1,614 | 1,653 | 39 (0.1 h) | 86% |
+| 2-2 | 1,893 | 2,233 | 340 (1.1 h) | 70% |
+| 2-3 | 2,234 | 2,269 | 35 (0.1 h) | 87% |
+| 2-4 | 2,593 | 2,646 | 53 (0.2 h) | 87% |
+| 3-1 | 2,790 | 3,136 | 346 (1.1 h) | 87% |
+| 3-2 | 3,169 | 3,188 | 19 (0.1 h) | 94% |
+| 3-3 | 3,393 | 3,773 | 380 (1.2 h) | 85% |
+| 3-4 | 3,774 | 3,925 | 151 (0.5 h) | 84% |
+| 4-1 | 3,927 | 3,959 | 32 (0.1 h) | 90% |
+| 4-2 | 4,005 | 4,430 | 425 (1.4 h) | 88% |
+| 4-3 | 4,431 | 4,627 | 196 (0.6 h) | 82% |
+| 4-4 | 4,733 | 5,336 | 603 (2.0 h) | 90% |
+| 5-1 | 5,337 | 5,414 | 77 (0.3 h) | 89% |
+| 5-2 | 5,415 | 5,838 | 423 (1.4 h) | 80% |
+| 5-3 | 5,839 | 6,441 | 602 (2.0 h) | 32% |
+| 5-4 | 6,443 | 6,598 | 155 (0.5 h) | 73% |
+| 6-1 | 6,600 | 6,682 | 82 (0.3 h) | 90% |
+| 6-2 | 6,683 | 6,951 | 268 (0.8 h) | 80% |
+| 6-3 | 6,976 | 7,529 | 553 (1.7 h) | 77% |
+| 6-4 | 7,539 | 7,823 | 284 (0.9 h) | 77% |
+| 7-1 | 7,825 | 7,926 | 101 (0.3 h) | 67% |
+| 7-2 | 8,386 | 8,405 | 19 (0.1 h) | 57% |
+| 7-3 | 8,433 | 8,435 | 2 (0.0 h) | 85% |
+| 7-4 | 8,842 | 9,425 | 583 (1.8 h) | 79% |
+| 8-1 | 9,807 | 10,274 | 467 (1.5 h) | 76% |
+| 8-2 | 10,515 | 11,372 | 857 (2.7 h) | 71% |
+| 8-3 | 11,374 | 11,523 | 149 (0.5 h) | 60% |
+| 8-4 | 12,914 | 16,396 | 3,482 (11.1 h) | 54% |
+
+Iterations are counted from the start of training, those to the first flag and their hours of training from the
+level's unlock. The run was interrupted four times and resumed from its last saved state, repeating the iterations
+since; times count each iteration once.
+
+The run used the code of commit cc791f4. Since then, four changes affect training: an episode's first frame gets the
+rarity of its start cell instead of 1, which had made episode starts 81% of the rarity the replay samples by; the best
+episodes keep the reward without the novelty bonus; they are ranked by the game's reward without its clipping of each
+frame to ±15; and training writes back the model states it computes.
+
+### PPO
+
+PPO found the flag of each level it unlocked within 821 iterations, but its success rates on the unlocked levels stayed
+too low for the curriculum's mean of 0.5 to open the next one. The unlocks came further and further apart; the last,
+3-1, came at iteration 17,516, and the sum of its training success rates stayed at about 3.6 from there to the end.
+Its best greedy go, at checkpoint 27,300, cleared the first 8 levels. The final checkpoint's sampled success rates
+average 49% on its 9 levels and at most 1.8% on each of the 23 it never trained on.
+
+| Level | Unlocked at | First flag at | Iterations to first flag | Success |
+|---|--:|--:|--:|--:|
+| 1-1 | 0 | 14 | 14 (0.0 h) | 85% |
+| 1-2 | 97 | 134 | 37 (0.0 h) | 63% |
+| 1-3 | 422 | 643 | 221 (0.2 h) | 55% |
+| 1-4 | 761 | 815 | 54 (0.1 h) | 24% |
+| 2-1 | 1,015 | 1,345 | 330 (0.3 h) | 55% |
+| 2-2 | 2,560 | 3,381 | 821 (0.8 h) | 19% |
+| 2-3 | 6,467 | 6,918 | 451 (0.4 h) | 51% |
+| 2-4 | 12,020 | 12,118 | 98 (0.1 h) | 65% |
+| 3-1 | 17,516 | 18,074 | 558 (0.5 h) | 24% |
+
+The run used `agent=ppo num_iters=30000` with the code described in this README. It was stopped three times and
+resumed, counted as for DreamerV3.
 
 ## Setup
 
-Requires [uv](https://docs.astral.sh/uv/), a C++ compiler and a CUDA GPU (the CPU works but is slow). The NES
-emulator is a fork of [nes-py](https://github.com/Kautenja/nes-py) in `external/nes-py` that also reports which layer
-each pixel shows; uv builds it.
+Requires [uv](https://docs.astral.sh/uv/), a C++ compiler and a CUDA GPU (the CPU works but is slow). The NES emulator
+is [nes-py](https://github.com/Kautenja/nes-py), pinned as a submodule in `external/nes-py`, with a patch that tells
+for each screen pixel whether it shows the backdrop, the background or a sprite (`patches/nes-py-layer-buffer.patch`,
+for `environment.remove_background`). uv builds it.
 
 ```sh
 git submodule update --init
+git -C external/nes-py apply ../../patches/nes-py-layer-buffer.patch
 uv sync
 uv run pytest                                    # tests
 uv run ruff check && uv run ruff format --check  # lint and formatting, line length 120
-uv run ty check                                  # types, for src/ and scripts/
+uv run ty check                                  # types
 ```
 
 ## Configuration
@@ -201,43 +259,34 @@ Configs are composed with [Hydra](https://hydra.cc) from `configs/` and can be o
 
 | File | Contents |
 |---|---|
-| `neurio_config.yaml` | workers, iterations, steps per iteration, checkpoint frequency, tracking URI |
-| `agent/ppo.yaml` | PPO hyperparameters (gamma, GAE tau, clipping, loss weights, batch size, epochs) |
-| `agent/model/*.yaml` | PPO's network: `impala` (default, residual encoder), `nature` (DQN encoder) |
-| `agent/learning_rate/*.yaml` | PPO's learning rate: `constant` (default), `linear_decay` |
+| `neurio_config.yaml` | workers, iterations, steps per iteration, checkpoint and resume frequency, tracking URI, novelty bonus |
 | `agent/dreamer.yaml` | DreamerV3 network sizes and training settings |
-| `agent/random.yaml` | random actions, as a baseline |
+| `agent/ppo.yaml` | PPO network and training settings |
 | `environment/base.yaml` | preprocessing and reward |
-| `levels/*.yaml` | level modes, see above |
+| `levels/curriculum.yaml`, `levels/single.yaml` | the curriculum over all levels, or one level, e.g. `levels=single levels.level=4-4` |
 
-## Training with fixed parameters
+## Training
 
 ```sh
-uv run src/train.py                                    # defaults: curriculum over all levels, 5000 iterations
-uv run src/train.py levels=single levels.level=1-3 num_iters=300 agent=dreamer
-uv run src/train.py agent.gamma=0.95 agent/learning_rate=linear_decay +tags.purpose=test
-uv run src/train.py agent=dreamer levels=single levels.level=1-1
+uv run src/train.py                                         # DreamerV3, curriculum over all levels
+uv run src/train.py agent=ppo num_iters=30000
+uv run src/train.py levels=single levels.level=1-3 num_iters=300 +tags.purpose=test
 ```
 
-One iteration is 32 × 128 = 4096 environment steps and takes about 2.5–3.5 s with PPO on 32 cores and an RTX 4090.
-Runs are grouped into MLflow experiments by level mode (e.g. `Neurio-lev-1-3`, `Neurio-lev-curriculum-32`).
-`+tags.<name>=<value>` adds MLflow tags, for example to group runs.
+Each run is an [MLflow](https://mlflow.org) run in `mlflow.db`, grouped into experiments by level mode (e.g.
+`Neurio-lev-curriculum-32`). It stores the resolved config (`config.yaml`), from which evaluation rebuilds the agent,
+the parameters, the metrics of each iteration and the checkpoints. Checkpoints are saved every `save_frequency`
+iterations, at the end, and when the number of levels cleared improved (tag `best_checkpoint_iter`).
+`+tags.<name>=<value>` adds MLflow tags.
 
-Checkpoints are saved every `save_frequency` iterations and at the end. Curriculum runs also save a checkpoint when
-the number of levels they clear improves; the run tag `best_checkpoint_iter` records it.
-
-**Resuming.** Every `resume_frequency` (1000) iterations and after the last one, a run stores the full training state:
-the networks with their optimizer, Dreamer's replay and best episodes, PPO's self-imitation memory, the curriculum, the
-novelty counts and the counters, about 8 GB for Dreamer. So a resumed run continues as if it had not been interrupted,
-instead of relearning from an empty replay. The state alternates between two files in the run's artifacts, so that an
-interrupted save leaves the previous one intact. Starting `train.py` with the same config as an interrupted run asks
-whether to continue it from its last saved state or to start a new run. Tags, `render`, `save_frequency`,
-`resume_frequency`, `tracking_uri`, the test settings and `num_iters` don't count as config, so a finished run can be
-continued with a higher `num_iters`. Without a terminal, e.g. with `nohup`, set `resume=true` (continue, start a new run
-if there is none to continue, or exit if the run already reached `num_iters`) or `resume=false` (always start a new
-one). Work since the last saved state is repeated: resuming first deletes the checkpoints and metrics the run logged
-after that state, also those of greedy evaluations, since they belong to the discarded course of training
-(`resume.discard_after`). This needs the tracking database, as MLflow has no API for deleting metrics.
+**Resuming.** Every `resume_frequency` iterations and after the last one, a run stores the full state of training: the
+networks with their optimizer, DreamerV3's replay and best episodes, PPO's self-imitation memory, the curriculum, the
+exploration statistics and the counters, about 8 GB for DreamerV3. A resumed run continues as if it had not been
+interrupted. The state alternates between two files, so that an interrupted save leaves the previous one intact.
+Starting `train.py` with the same config as an interrupted run asks whether to continue it; tags, the frequencies, the
+tracking URI, the test settings and `num_iters` don't count as config, so a finished run can be continued with a higher
+`num_iters`. Without a terminal, set `resume=true` or `resume=false`. Resuming deletes what the run logged after its
+saved state, checkpoints and metrics, since the resumed run repeats those iterations (`resume.discard_after`).
 
 For long runs, keep the machine from suspending:
 
@@ -245,177 +294,79 @@ For long runs, keep the machine from suspending:
 nohup systemd-inhibit --what=sleep:idle uv run src/train.py > train.log 2>&1 &
 ```
 
-## Hyperparameter tuning
+## Evaluation
 
-`src/tune.py` runs an [Optuna](https://optuna.org) study. Each trial is a normal training run, logged to MLflow.
-Unpromising trials are stopped early based on the objective reported after each iteration.
-
-```sh
-uv run src/tune.py --study-name mechanics --search-space exploration --hours 10 --warmup-iters 250 -- \
-    levels=tuning objective=cleared_mean num_iters=700
-```
-
-- `--search-space` selects a search space defined in `src/tune.py`:
-  - `ppo`: how PPO learns from its experience: learning rate, epochs, batch size, GAE tau, clip range and critic
-    weight.
-  - `exploration`: self-imitation weight and memory size, gamma, entropy weight and learning
-    rate.
-- The objective is `cleared` by default, the expected number of levels cleared from the recent success rates. Use
-  `cleared_mean`, its mean over the run, to also reward learning fast and steadily.
-- `--n-trials` and/or `--hours` limit the study. The time limit only stops new trials; a running trial finishes.
-- Overrides after `--` apply to every trial.
-- `--pruner` chooses `median` (default), `hyperband` or `none`. `--warmup-iters` sets the number of iterations before
-  a trial can be pruned (default 50).
-- Studies are stored in `optuna.db`. Rerunning the same command resumes a study.
-- Several processes can work on one study at the same time. Two parallel processes complete about 1.3× as many
-  trials as one, since a single trial uses only about half of the CPU. Start them a few seconds apart, and give them
-  different `--seed` values or none.
-
-Tune on difficult levels with different mechanics, such as `levels=tuning`. 1-1 alone rewards running right and
-favours short-sighted settings (gamma 0.9) that fail on later levels.
-
-## Batches of experiments
-
-`scripts/overnight.py` runs a fixed plan of training runs one after the other, each as its own process. Every run is
-tagged with `experiment`, `variant`, `level` and `repeat`, and runs that would not finish before the deadline are
-skipped. The plan is defined at the top of the script; currently it compares the DQN, a wider DQN and the
-IMPALA encoder on 2-2, two runs at a time.
+The agent always takes its most likely action and the episodes are seeded, so a checkpoint plays the same way every
+time. It plays the run's levels in order from small Mario in 1-1 on, with the power-up he reached each flag with, like
+the game, and stops at the first level it does not clear. Without `test_run_id`, the run that cleared the most levels in
+the experiment of the configured level mode is used; without `test_iter`, its latest checkpoint. Levels given on the
+command line replace the run's own.
 
 ```sh
-uv run scripts/overnight.py --dry-run                                            # print the plan
-nohup systemd-inhibit --what=sleep:idle uv run scripts/overnight.py > overnight.log 2>&1 &
-uv run scripts/overnight.py --report --experiment overnight-2026-10-04-1359      # summary per level and variant
+uv run src/test.py test_run_id=<run id> test_iter=19600      # watch it in a window at 60 frames per second
+uv run src/greedy_progress.py test_run_id=<run id>           # all checkpoints, without a window
+uv run src/sampled_success.py test_run_id=<run id>           # success rate of each level
+uv run src/clean_checkpoints.py <run id> [--apply]           # delete evaluated checkpoints that are no record
 ```
 
-The experiment name is printed when a batch starts. Each run's log is in `overnight/<experiment>/`.
+`greedy_progress.py` logs per checkpoint `greedy/progress`, the summed distance its episodes got, and
+`greedy/levels_cleared`, tags the earliest best checkpoint as `best_greedy_iter` and plots the progress to `plots/`.
+Calling it again only evaluates new checkpoints.
 
-## Watching a trained agent
+One greedy go tells little about how well the levels are learned: from one checkpoint to the next, it may clear all 32
+levels or fail on the first. `sampled_success.py` measures a checkpoint's success rate on each level: 1024 episodes per
+level, from small Mario, with actions sampled from the policy as in training, but without learning. It logs them as
+`sampled/success_<level>`, with the checkpoint's iteration as step, and takes about 1¾ hours.
 
-`src/test.py` shows the agent playing in a game window at the NES frame rate of 60 frames per second. It plays the
-run's levels in order, e.g. 1-1, 1-2, … for the curriculum, from small Mario in 1-1 on and with the power-up he
-reached each flag with, like in the game, and stops at the first level it does not clear. It logs where each episode ended. The agent always takes its most likely
-action and the episodes are seeded, so a checkpoint plays the same way every time. The model is built from the run's own `config.yaml`, so it
-matches the checkpoint.
+Checkpoints take about 72 MB; `clean_checkpoints.py` keeps those that
+were not evaluated yet, each one that cleared more levels than all before it, and the tagged ones. Clean only runs that
+will not be resumed: resuming restores the best checkpoint of the saved state, which may have been deleted since.
 
-```sh
-uv run src/test.py                                               # best curriculum run, latest checkpoint
-uv run src/test.py test_run_id=<run id> test_iter=1189           # a specific run and checkpoint
-uv run src/test.py test_run_id=<run id> levels=single levels.level=1-3   # a single level
-```
-
-- Without `test_run_id`, it picks the run with the best `objective` in the experiment of the configured level mode
-  (by default `Neurio-lev-curriculum-32`; with `levels=single levels.level=1-3`, `Neurio-lev-1-3`).
-- Without `test_iter`, it uses the latest checkpoint.
-- Levels given on the command line replace the run's own.
-- Runs from before the config artifact was introduced cannot be loaded.
-
-`src/greedy_progress.py` plays this greedy run, without a window, for every checkpoint of a run (selected the same
-way). Each checkpoint's progress is the sum of the distances its episodes got: to the flags of the cleared levels plus
-to where it failed. The distance counts the changes of x within each area, as the reward does, so it does not drop
-when Mario goes down a pipe into a room further on, whose x positions start again from the left; the end x position
-did, e.g. in 8-4's water stretch. It logs `greedy/progress` and `greedy/levels_cleared` to the run with the checkpoint's
-iteration as step, tags the earliest best checkpoint as `best_greedy_iter` (for `test_iter`) and plots the progress
-to `plots/` and the run's artifacts. Calling it again only evaluates new checkpoints. Each one takes about 30–60 s.
-
-```sh
-uv run src/greedy_progress.py test_run_id=<run id>
-```
-
-Checkpoints take about 72 MB each. `src/clean_checkpoints.py` deletes those of a run that were evaluated, except each
-one that cleared more levels than every checkpoint before it, the ones tagged `best_checkpoint_iter` and
-`best_greedy_iter`. Checkpoints not evaluated yet are kept. Resuming doesn't need checkpoints.
-
-```sh
-uv run src/clean_checkpoints.py <run id>            # list what would be deleted
-uv run src/clean_checkpoints.py <run id> --apply    # delete it
-```
-
-## World model previews
-
-For DreamerV3 runs, each checkpoint also stores `preview.gif`: replayed sequences of the game, of which the world model
-sees the first quarter and then predicts the rest from the actions taken. Each column shows the true frames, the
-predicted ones and their difference (gray where they agree); the border turns from green to red where the prediction
-starts. Small, fast things like Mario, enemies and fireballs fade first when the model is unsure.
-
-`src/preview.py` renders the same for any checkpoint and level, from episodes it plays itself, plus a "dream": the
-same start, continued with actions of the agent's own policy and no real frames. It selects the run like `test.py`
-and writes the GIFs to `previews/`:
+**World model previews.** Each DreamerV3 checkpoint stores `preview.gif`: replayed sequences of which the world model
+sees the first quarter and predicts the rest from the actions taken, with the true and predicted frames and their
+difference. `src/preview.py` renders the same for any checkpoint and level from episodes it plays itself, plus a
+"dream" that continues with the agent's own actions, to `previews/`:
 
 ```sh
 uv run src/preview.py test_run_id=<run id> levels=single levels.level=1-2
 ```
 
-## Dashboards
+## Metrics
 
 ```sh
 uv run mlflow ui --backend-store-uri sqlite:///mlflow.db     # http://127.0.0.1:5000
-uvx optuna-dashboard sqlite:///optuna.db                     # http://127.0.0.1:8080
 ```
 
 Metrics are logged once per iteration, with the iteration as MLflow's step. A **step** is one action of every worker,
-held for 4 frames; an **iteration** is 128 steps of all 32 workers followed by the agent's update; an **episode** is one
-attempt at a level, until Mario dies, reaches the flag or is cut off.
+held for 4 frames; an **iteration** is 128 steps of all 32 workers followed by the agent's update.
 
 | Metric | Meaning |
 |---|---|
-| `levels/success_<level>`, `levels/distance_<level>` | share of the level's last 50 episodes that reached the flag, and the mean distance they got (see `greedy/progress`) |
-| `levels/cleared`, `levels/cleared_mean` | the expected number of levels cleared (sum of the success rates), and its mean over the run so far |
-| `levels/unlocked` | curriculum: number of unlocked levels |
+| `levels/success_<level>`, `levels/distance_<level>` | share of the level's last 50 episodes that reached the flag, and the mean distance they got |
+| `levels/cleared` | the expected number of levels cleared, the sum of the success rates |
+| `levels/unlocked` | number of unlocked levels |
 | `world_model/reconstruction`, `/reward`, `/dynamics` | DreamerV3: how well the world model predicts the frames, the rewards and its own next state |
 | `behavior/entropy` | randomness of the policy, between 0 and ln 12 ≈ 2.5 |
 | `behavior/cmpo_changes` | DreamerV3: share of replayed states where the CMPO target makes another action the most likely |
 | `behavior/imagined_return`, `/return_scale` | DreamerV3: the return the actor expects in imagination, and the spread of returns that advantages are divided by |
 | `exploration/plan2explore_reward` | Plan2Explore's reward per imagined step |
-| `powerups/start_<level>` | share of the level's episodes that start with a power-up, from the previous level's finishes |
 | `exploration/novelty_bonus`, `/visited_cells` | the novelty bonus per step, and the number of cells visited so far |
-| `exploration/untried_actions` | share of the steps that took an action untried in Mario's cell |
-| `exploration/stuck_levels`, `/window_<level>` | levels stuck at a wall, and per level the window before the wall in which untried actions are taken, in pixels (0 while not stuck) |
+| `exploration/untried_actions` | share of the steps that took an untried action |
+| `exploration/stuck_levels`, `/window_<level>` | levels stuck at a wall, and per level the window before the wall in pixels (0 while not stuck) |
+| `powerups/start_<level>` | share of the level's episodes that start with a power-up |
 | `progress/env_steps`, `/updates` | steps of all workers so far, and DreamerV3's updates so far |
-| `greedy/progress`, `/levels_cleared` | per checkpoint, logged by `greedy_progress.py`: progress and levels cleared in one greedy go from 1-1 |
+| `greedy/progress`, `/levels_cleared` | per checkpoint, logged by `greedy_progress.py` |
+| `sampled/success_<level>` | per checkpoint, logged by `sampled_success.py` |
 
 ## Project layout
 
 | Path | Contents |
 |---|---|
-| `src/train.py` | `train()`, used by the command line and by `tune.py` |
-| `src/tune.py` | hyperparameter search |
-| `src/test.py`, `src/greedy_progress.py`, `src/clean_checkpoints.py`, `src/preview.py`, `src/evaluation.py` | watching a trained agent, greedy progress of all checkpoints and deleting the uninteresting ones, world model previews, loading and playing them |
-| `src/environment.py` | environment and preprocessing wrappers, level selection |
-| `src/game_loop.py`, `src/exploration.py` | interaction between environments and agent, metrics; the novelty bonus |
-| `src/agents/` | the agent interface and the random agent |
-| `src/agents/ppo/` | PPO: agent, actor-critic networks, GAE, self-imitation, reward scaling |
-| `src/agents/dreamer/` | DreamerV3: agent, world model, networks, replay, best episodes, optimizer |
-| `src/level_schedulers.py`, `src/powerups.py` | curriculum, recent results per level; the levels' start power-ups |
+| `src/train.py`, `src/resume.py` | training runs, and resuming them |
+| `src/environment.py`, `src/powerups.py` | the game, preprocessing and reward; the levels' start power-ups |
+| `src/game_loop.py`, `src/exploration.py` | interaction between environments and agent, metrics; novelty bonus and untried actions |
+| `src/level_schedulers.py` | the curriculum and the recent results of each level |
+| `src/agents/` | the agent interface, `dreamer/` and `ppo/` |
+| `src/evaluation.py`, `src/test.py`, `src/greedy_progress.py`, `src/sampled_success.py`, `src/clean_checkpoints.py`, `src/preview.py` | loading and playing trained agents |
 | `src/config/` | dataclasses behind the Hydra configs |
-| `scripts/overnight.py` | batches of experiments |
-| `test/` | tests; the PPO and model tests check the jaxtyping shape annotations at runtime |
-
-## Findings so far
-
-- **γ:** gamma 0.9 learns 1-1 about twice as fast as 0.99. On 1-3, though, no gamma, entropy or death-penalty setting
-  got past the dead end at x = 783.
-- **Death penalty:** a large one (300) makes the agent too cautious. It stalls until the timer runs out, since a
-  penalty that far away is discounted to almost nothing.
-- **Curiosity** (a count-based bonus for reaching rarely visited positions, removed since): it helps, but not reliably. On 1-3, 3 of 11 runs with a bonus learned the level (scales 0.5 and 2.0),
-  against 0 of 17 runs without one. Whether a run succeeds is decided in its first ~50 iterations, and the bonus
-  becomes negligible soon after. On 4-4 the bonus roughly doubled the distance reached.
-- **Self-imitation:** with curiosity, every run on 1-3 finds the route around the dead end, but few learn it. Imitating
-  the 16 best own episodes per level (`agent.sil_loss_weight=1.0`) made all 8 of 8 runs learn it (2 of 8 without), and
-  6 of 8 reached the flag within 100 iterations. The prioritized memory collapsed the policy instead (no flags).
-- **Curriculum:** with forced unlocks after a timeout, the agent forgot earlier levels. Unlocking on mastery fixed
-  that.
-- **Curriculum tuning:** in 2M environment steps the best settings (self-imitation weight 0.6–0.8 with 4–6 episodes per
-  level, bonus 0.6–0.85, gamma about 0.95) cleared world 1 and were still improving. None of them learned 2-1: one run
-  died at the same spot (x ≈ 1760) in almost every episode, another still made progress up to x ≈ 2900.
-- **2-1 alone:** every setting that ran 400 iterations on 2-1 learned it (flag in 44–86% of the final episodes), across
-  gamma 0.90–0.98, self-imitation weights 0.1–2.6 and bonus scales 0.1–1.4. In the curriculum it only lacked practice.
-- **Defaults:** the settings of the best curriculum trials (self-imitation 0.7 with 5 episodes per level, bonus 0.7,
-  gamma 0.95, entropy 0.013, learning rate 4.5e-4).
-- **Network:** in one calibration run each on 1-1, 1-3, 2-2 and 4-1, IMPALA cleared every level earlier than the DQN
-  encoder (2-2 at iteration 641 against 717) at almost the same training time. Swimming (2-2) took about 500 iterations
-  with both, against 50–100 for the other levels.
-- **Mechanics tuning** (22 trials on 1-1, 1-3, 2-2 and 4-1, 700 iterations): the best trials scored as well as the
-  defaults (mean levels cleared 1.51 against 1.50). Gamma above 0.96, a curiosity bonus below 0.3 and an initial
-  entropy weight below 0.008 were clearly worse; the self-imitation weight (0.4–1.9), its memory size (6–51 episodes)
-  and the learning rate (1e-4–1e-3) hardly mattered. 2-2 stayed the bottleneck: the best runs reached its flag in 30–40%
-  of the episodes, dying to enemies all over the second half of the level rather than at one obstacle.
+| `test/` | tests; the PPO tests check the jaxtyping shape annotations at runtime |

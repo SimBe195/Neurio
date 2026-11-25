@@ -1,19 +1,22 @@
-defaults:
-  - model: impala
-  # Constant, since training on later levels is open ended with the level curriculum
-  - learning_rate: constant
-  - _self_
-
 _target_: config.agent.PPOAgentConfig
+
+# IMPALA residual encoder, twice as wide as the original, which helped generalization in Procgen
+model:
+  _target_: config.model.ImpalaActorCriticConfig
+  action_embedding_size: 16
+  channels: [32, 64, 64]
+  blocks_per_stage: 2
+  fc_size: 256
+# Constant, since training on later levels is open ended with the level curriculum
+learning_rate: 0.00045
 
 # The network has no memory, so it sees the last 4 frames to perceive motion
 num_stack_frames: 4
 gamma: 0.98
-tau: 0.95
+lam: 0.95
 epochs_per_update: 5
 batch_size: 512
 clip_param: 0.2
-clip_value: False
 critic_loss_weight: 0.5
 initial_entropy_loss_weight: 0.013
 final_entropy_loss_weight: 0.001
@@ -21,9 +24,10 @@ final_entropy_loss_weight: 0.001
 # extending with new levels
 entropy_decay_updates: 700
 grad_clip_norm: 0.5
-normalize_advantages: True
 adam_eps: 1.0e-05
-# Self-imitation learning of the agent's own best episodes, see config.agent.PPOAgentConfig. 0 disables it.
+# Share of the uniform distribution mixed into the policy, as in DreamerV3: no action becomes impossible
+unimix: 0.01
+# Self-imitation learning of the agent's own best episodes, see config.agent.PPOAgentConfig
 sil_loss_weight: 0.7
 sil_value_loss_weight: 0.01
 sil_episodes_per_level: 5

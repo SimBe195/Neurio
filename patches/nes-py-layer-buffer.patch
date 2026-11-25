@@ -1,0 +1,212 @@
+diff --git a/nes_emu/include/nes_emu/emulator.hpp b/nes_emu/include/nes_emu/emulator.hpp
+index 4498f89..72f5c3d 100644
+--- a/nes_emu/include/nes_emu/emulator.hpp
++++ b/nes_emu/include/nes_emu/emulator.hpp
+@@ -113,6 +113,12 @@ class Emulator {
+     ///
+     inline NES_Pixel* get_screen_buffer() { return ppu.get_screen_buffer(); }
+ 
++    /// Return a pointer to the layer buffer's first address.
++    ///
++    /// @return a pointer to the layer of each screen pixel, see PixelLayer
++    ///
++    inline NES_Byte* get_layer_buffer() { return ppu.get_layer_buffer(); }
++
+     /// Return a 8-bit pointer to the RAM buffer's first address.
+     ///
+     /// @return a 8-bit pointer to the RAM buffer's first address
+diff --git a/nes_emu/include/nes_emu/ppu.hpp b/nes_emu/include/nes_emu/ppu.hpp
+index fa016fe..15f12d3 100644
+--- a/nes_emu/include/nes_emu/ppu.hpp
++++ b/nes_emu/include/nes_emu/ppu.hpp
+@@ -28,6 +28,16 @@ const int SCANLINE_END_CYCLE = 341;
+ const int FRAME_END_SCANLINE = 261;
+ 
+ /// The Picture Processing Unit (PPU) for the NES
++/// The layer a screen pixel was drawn from.
++enum PixelLayer : NES_Byte {
++    /// The universal background color, where neither background nor sprites are opaque
++    BACKDROP_LAYER = 0,
++    /// An opaque background tile pixel
++    BACKGROUND_LAYER = 1,
++    /// An opaque sprite pixel in front of the background
++    SPRITE_LAYER = 2,
++};
++
+ class PPU {
+  private:
+     /// Number of bytes in object attribute memory.
+@@ -166,6 +176,8 @@ class PPU {
+     /// The internal screen data structure with height matching the visible
+     /// scan lines and width matching the number of visible scan line dots.
+     NES_Pixel screen[VISIBLE_SCANLINES][SCANLINE_VISIBLE_DOTS];
++    /// The layer each screen pixel was drawn from, see PixelLayer.
++    NES_Byte layers[VISIBLE_SCANLINES][SCANLINE_VISIBLE_DOTS];
+ 
+     /// Invalidate sprite row prefetch data.
+     void invalidate_sprite_rows();
+@@ -234,6 +246,7 @@ class PPU {
+         NES_Byte background_tile_cache_palette_high;
+         NES_Byte background_tile_cache_opaque_mask;
+         std::array<NES_Pixel, SCREEN_PIXEL_COUNT> screen;
++        std::array<NES_Byte, SCREEN_PIXEL_COUNT> layers;
+     };
+ 
+     /// Initialize a new PPU.
+@@ -248,7 +261,8 @@ class PPU {
+         background_tile_cache_high_bits(0),
+         background_tile_cache_palette_high(0),
+         background_tile_cache_opaque_mask(0),
+-        screen() { }
++        screen(),
++        layers() { }
+ 
+     /// Perform a single cycle on the PPU.
+     void cycle(PictureBus& bus);
+@@ -332,6 +346,10 @@ class PPU {
+ 
+     /// Return a pointer to the screen buffer.
+     inline NES_Pixel* get_screen_buffer() { return *screen; }
++
++    /// Return a pointer to the layer buffer, which tells for each screen pixel
++    /// whether it shows the backdrop, the background or a sprite.
++    inline NES_Byte* get_layer_buffer() { return *layers; }
+ };
+ 
+ }  // namespace NES
+diff --git a/nes_emu/src/nes_emu/ppu.cpp b/nes_emu/src/nes_emu/ppu.cpp
+index 1065180..adb5fa2 100644
+--- a/nes_emu/src/nes_emu/ppu.cpp
++++ b/nes_emu/src/nes_emu/ppu.cpp
+@@ -74,6 +74,7 @@ void PPU::reset() {
+         SpriteRow()
+     );
+     std::fill(&screen[0][0], &screen[0][0] + SCREEN_PIXEL_COUNT, 0);
++    std::fill(&layers[0][0], &layers[0][0] + SCREEN_PIXEL_COUNT, BACKDROP_LAYER);
+ }
+ 
+ PPU::Snapshot PPU::save_state() const {
+@@ -123,6 +124,11 @@ PPU::Snapshot PPU::save_state() const {
+         &screen[0][0] + SCREEN_PIXEL_COUNT,
+         snapshot.screen.begin()
+     );
++    std::copy(
++        &layers[0][0],
++        &layers[0][0] + SCREEN_PIXEL_COUNT,
++        snapshot.layers.begin()
++    );
+     return snapshot;
+ }
+ 
+@@ -171,6 +177,7 @@ void PPU::load_state(const Snapshot& snapshot) {
+     background_tile_cache_opaque_mask =
+         snapshot.background_tile_cache_opaque_mask;
+     std::copy(snapshot.screen.begin(), snapshot.screen.end(), &screen[0][0]);
++    std::copy(snapshot.layers.begin(), snapshot.layers.end(), &layers[0][0]);
+ }
+ 
+ void PPU::invalidate_sprite_rows() {
+@@ -509,10 +516,15 @@ void PPU::cycle(PictureBus& bus) {
+                 }
+                 // get the address of the color in the palette
+                 NES_Byte paletteAddr = bgColor;
+-                if ( (!bgOpaque && sprOpaque) || (bgOpaque && sprOpaque && spriteForeground) )
++                NES_Byte layer = BACKGROUND_LAYER;
++                if ( (!bgOpaque && sprOpaque) || (bgOpaque && sprOpaque && spriteForeground) ) {
+                     paletteAddr = sprColor;
+-                else if (!bgOpaque && !sprOpaque)
++                    layer = SPRITE_LAYER;
++                } else if (!bgOpaque && !sprOpaque) {
+                     paletteAddr = 0;
++                    layer = BACKDROP_LAYER;
++                }
++                layers[y][x] = layer;
+                 // lookup the pixel in the palette and write it to the screen
+                 screen[y][x] = PALETTE[bus.read_palette(paletteAddr)];
+             }
+diff --git a/nes_py/_native.pyx b/nes_py/_native.pyx
+index 0c737ac..df19328 100644
+--- a/nes_py/_native.pyx
++++ b/nes_py/_native.pyx
+@@ -79,6 +79,7 @@ cdef extern from "nes_emu/emulator.hpp" namespace "NES":
+     cdef cppclass Emulator:
+         Emulator(string rom_path) except +
+         NES_Pixel* get_screen_buffer() nogil
++        NES_Byte* get_layer_buffer() nogil
+         NES_Byte* get_memory_buffer() nogil
+         NES_Byte* get_controller(int port) nogil
+         void reset() except + nogil
+@@ -374,6 +375,23 @@ cdef class NativeEmulator:
+             strides[2] = 1
+         return _uint8_array(3, dims, strides, <void*> data, self)
+ 
++    def layer_buffer(self):
++        """Return a no-copy view over the layer each screen pixel shows."""
++        self._require_open()
++        cdef cnp.npy_intp dims[2]
++        cdef cnp.npy_intp strides[2]
++        dims[0] = SCREEN_HEIGHT
++        dims[1] = SCREEN_WIDTH
++        strides[0] = SCREEN_WIDTH
++        strides[1] = 1
++        return _uint8_array(
++            2,
++            dims,
++            strides,
++            <void*> self._emu.get_layer_buffer(),
++            self,
++        )
++
+     def copy_screen_rgb(self, object output=None):
+         """Copy the current screen to a C-contiguous 24-bit RGB array."""
+         self._require_open()
+diff --git a/nes_py/nes_env.py b/nes_py/nes_env.py
+index f296f4e..c4faaae 100644
+--- a/nes_py/nes_env.py
++++ b/nes_py/nes_env.py
+@@ -120,6 +120,9 @@ class NESEnv(gym.Env):
+         # setup the controllers, screen, and RAM buffers
+         self.controllers = [self._controller_buffer(port) for port in range(2)]
+         self.screen = self._screen_buffer()
++        # the layer each screen pixel shows: 0 the backdrop color, 1 the
++        # background, 2 a sprite in front of the background
++        self.layers = self._env.layer_buffer()
+         self.ram = self._ram_buffer()
+ 
+     def _screen_buffer(self):
+diff --git a/nes_py/tests/test_nes_env.py b/nes_py/tests/test_nes_env.py
+index b32efde..5443464 100644
+--- a/nes_py/tests/test_nes_env.py
++++ b/nes_py/tests/test_nes_env.py
+@@ -365,6 +365,31 @@ class ShouldReadAndWriteMemory(TestCase):
+             env.close()
+ 
+ 
++class ShouldExposePixelLayers(TestCase):
++    def test(self):
++        env = create_smb1_instance()
++        try:
++            env.reset()
++            for _ in range(90):
++                env.step(8)
++                env.step(0)
++            for _ in range(120):
++                env.step(0)
++            layers = env.layers
++            self.assertEqual(SCREEN_SHAPE_24_BIT[:2], layers.shape)
++            self.assertEqual(np.uint8, layers.dtype)
++            self.assertEqual({0, 1, 2}, set(np.unique(layers)))
++            # the backdrop is the one universal background color
++            backdrop = env.screen[layers == 0]
++            self.assertTrue((backdrop == backdrop[0]).all())
++            # Mario is the only sprite in front of the background
++            rows, columns = np.nonzero(layers == 2)
++            self.assertLessEqual(rows.max() - rows.min(), 16)
++            self.assertLessEqual(columns.max() - columns.min(), 16)
++        finally:
++            env.close()
++
++
+ class ShouldResetAndCloseEnv(TestCase):
+     def test(self):
+         env = create_smb1_instance()

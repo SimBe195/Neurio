@@ -1,3 +1,5 @@
 [submodule "external/nes-py"]
 	path = external/nes-py
 	url = https://github.com/Kautenja/nes-py.git
+	# Its working tree carries patches/nes-py-layer-buffer.patch
+	ignore = dirty

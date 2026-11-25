@@ -1,3 +1,0 @@
-_target_: config.learning_rate.ConstantLRConfig
-
-learning_rate: 0.00045

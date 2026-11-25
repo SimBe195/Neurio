@@ -4,7 +4,7 @@ import mlflow
 import numpy as np
 from gymnasium.vector import AsyncVectorEnv
 
-from agents import Agent, StepOutcome
+from agents import Agent, Play, StepOutcome
 from environment import Powerup
 from exploration import NoveltyBonus, Position, UntriedActions
 from level_schedulers import LevelScheduler
@@ -13,9 +13,9 @@ from powerups import StartPowerups
 
 @dataclass
 class EpisodeStats:
-    reward: float
-    length: int
     level: str
+    # The worker that played it
+    worker: int
     # Where the episode ended and how far it got, see environment.ProgressShaping
     x_pos: int
     distance: int
@@ -33,13 +33,13 @@ class GameLoop:
         environment: AsyncVectorEnv,
         agent: Agent,
         level_scheduler: LevelScheduler | None = None,
-        greedy: bool = False,
+        play: Play = Play.TRAIN,
         novelty_bonus: NoveltyBonus | None = None,
         start_powerups: StartPowerups | None = None,
         untried_actions: UntriedActions | None = None,
     ) -> None:
         """
-        :param greedy: Whether the agent takes its most likely actions, for evaluation
+        :param play: How the agent acts, which only learns while training
         :param novelty_bonus: Exploration bonus for the agent to learn from; episode rewards stay the game's own
         :param start_powerups: Statistics from which the levels' start power-ups are sampled, else Mario starts small
         :param untried_actions: Which actions have been taken in each place, to try each one before walls while training
@@ -47,10 +47,11 @@ class GameLoop:
         self.env = environment
         self.agent = agent
         self.level_scheduler = level_scheduler
-        self.greedy = greedy
+        self.play = play
         self.novelty_bonus = novelty_bonus
         self.start_powerups = start_powerups
-        self.untried_actions = untried_actions if not greedy else None
+        assert play is Play.TRAIN or not untried_actions, "Untried actions are taken while training only"
+        self.untried_actions = untried_actions
 
         self.iter_episodes: list[EpisodeStats] = []
         self.iter_novelty_bonus = 0.0
@@ -67,6 +68,7 @@ class GameLoop:
         """
         self.env.reset_async(seed=seed)
         self.current_states, self.current_infos = self.env.reset_wait()
+        self.agent.reset()
         self.max_distances = np.zeros(self.env.num_envs, dtype=np.int64)
 
     @staticmethod
@@ -87,11 +89,11 @@ class GameLoop:
                 on_ground,
             )
             self.iter_untried_actions += int(untried.any(-1).sum())
-        actions = self.agent.act(self.current_states, greedy=self.greedy, untried=untried)
+        actions = self.agent.act(self.current_states, self.play, untried=untried)
         if self.untried_actions is not None:
             self.untried_actions.record(positions, on_ground, actions)
         self.env.step_async(np.array(actions))
-        if not self.greedy:
+        if self.play is Play.TRAIN:
             self.agent.train_while_playing()
         self.current_states, rewards, terminated, truncated, infos = self.env.step_wait()
         # For finished episodes, the first step of the next one
@@ -104,12 +106,14 @@ class GameLoop:
         levels = [str(info["level"][w]) for w, info in enumerate(step_infos)]
         distances = [int(info["distance"][w]) for w, info in enumerate(step_infos)]
         self.max_distances = np.maximum(self.max_distances, distances)
-        rarity = None
+        bonus = rarity = first_rarity = None
         if self.novelty_bonus is not None:
             visits = self.novelty_bonus.visit(self._positions(step_infos))
             bonus = self.novelty_bonus.bonus(visits)
             rewards = rewards + bonus
             rarity = 1 / visits
+            # Where the next episodes start, which no step reached
+            first_rarity = 1 / self.novelty_bonus.visits(self._positions([infos] * self.env.num_envs))
             self.iter_novelty_bonus += float(bonus.sum())
 
         self.agent.observe(
@@ -119,10 +123,12 @@ class GameLoop:
                 terminated,
                 truncated,
                 levels,
-                infos.get("final_obs"),
                 game_rewards=np.array([float(info["game_reward"][w]) for w, info in enumerate(step_infos)]),
-                rarity=rarity,
                 start_powerups=np.array([int(info["start_powerup"][w]) for w, info in enumerate(step_infos)]),
+                final_observations=infos.get("final_obs"),
+                rarity=rarity,
+                first_rarity=first_rarity,
+                bonuses=bonus,
             )
         )
         for worker in np.flatnonzero(dones):
@@ -131,9 +137,8 @@ class GameLoop:
 
     def record_episode(self, info: dict, worker: int, level: str) -> None:
         episode = EpisodeStats(
-            reward=float(info["episode"]["r"][worker]),
-            length=int(info["episode"]["l"][worker]),
             level=level,
+            worker=worker,
             x_pos=int(info["x_pos"][worker]),
             distance=int(info["distance"][worker]),
             max_distance=int(self.max_distances[worker]),

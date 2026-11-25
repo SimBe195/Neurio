@@ -7,21 +7,13 @@ from jaxtyping import Float, Real
 @dataclass
 class GaeEstimator:
     """
-    Implements the generalized advantage estimation mechanism. The GAE is defined by the formula
-    GAE_t = sum_{k=0}^{T-1} (gamma * tau)^k * delta_{t + k}
-    where
-    - gamma is the discount factor
-    - tau is the GAE smoothing parameter
-    - T is the time horizon
-    - delta_t is the temporal difference error at time t, defined as delta_t = r_t + gamma * V(s_{t+1}) - V(s_t)
-    - r_t is the reward given for the action taken at time t
-    - V(s_t) is the value of the state at time t
-
-    - Return_t = V(s_t) + GAE_t
+    Generalized advantage estimation (Schulman et al., 2016): GAE_t = sum_k (gamma * lam)^k * delta_{t+k} with the TD
+    errors delta_t = r_t + gamma * V(s_{t+1}) - V(s_t), not continued past the end of an episode. The returns, the
+    critic's targets, are V(s_t) + GAE_t.
     """
 
     gamma: float
-    tau: float
+    lam: float
 
     def get_advantage_returns(
         self,
@@ -30,15 +22,10 @@ class GaeEstimator:
         dones: Real[torch.Tensor, " buffer *worker"],
     ) -> tuple[Float[torch.Tensor, " buffer *worker"], Float[torch.Tensor, " buffer *worker"]]:
         """
-        Calculate the Generalized Advantage Estimation (GAE) and returns.
-
-        Args:
-            rewards: Tensor of rewards of shape (T) or (T, W).
-            values: Tensor of values of shape (T+1) or (T+1, W).
-            dones: Tensor indicating if an episode is done of shape (T) or (T, W).
-
-        Returns:
-            Tuple[torch.Tensor, torch.Tensor]: A tuple containing the advantages and returns of shape (T) or (T, W).
+        :param rewards: Of each step, optionally per worker
+        :param values: Of each step and of the state after the last one
+        :param dones: Whether the episode ended with each step
+        :return: The advantages and returns of each step
         """
         # Shape (T, W) or (T)
         if not (rewards.dim() == values.dim() == dones.dim() <= 2):
@@ -58,7 +45,7 @@ class GaeEstimator:
         advantages = torch.zeros_like(rewards)
         gae = 0
         for t, (done, delta) in reversed(list(enumerate(zip(dones, deltas, strict=True)))):
-            gae = delta + self.gamma * self.tau * (1 - done) * gae
+            gae = delta + self.gamma * self.lam * (1 - done) * gae
             advantages[t] = gae
 
         returns = advantages + values[:-1]

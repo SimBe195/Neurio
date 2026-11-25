@@ -7,11 +7,8 @@ outputs/
 mlruns
 mlflow.db
 multirun/
-optuna_studies/
-optuna.db
 recordings/
 .venv/
-overnight/
 *.log
 .coverage
 previews/

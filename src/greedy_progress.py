@@ -24,6 +24,7 @@ from mlflow.entities import Metric
 from omegaconf import DictConfig
 from tqdm import tqdm
 
+from agents import Play
 from evaluation import checkpoint_iters, load_evaluation, play_levels
 from game_loop import GameLoop
 from resume import BEST_GREEDY_ITER_TAG
@@ -78,7 +79,7 @@ def main(cfg: DictConfig) -> None:
         progress = {int(m.step): m.value for m in client.get_metric_history(run_id, PROGRESS)}
         new_iters = [i for i in checkpoint_iters(run_id) if i not in progress]
         log.info(f"{len(progress)} checkpoints evaluated before, {len(new_iters)} new ones.")
-        loop = GameLoop(evaluation.env, agent, greedy=True)
+        loop = GameLoop(evaluation.env, agent, play=Play.GREEDY)
         levels = evaluation.config.levels.evaluation_levels()
         for iteration in tqdm(new_iters):
             agent.load(run_id, iteration)

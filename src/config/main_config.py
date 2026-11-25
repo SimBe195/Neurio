@@ -18,11 +18,7 @@ class NeurioConfig:
     save_frequency: int
     # Iterations between saves of the full state of training to resume from, which include the replay, see resume.py
     resume_frequency: int
-    render: bool
     tracking_uri: str
-    # "cleared": the expected number of levels cleared, from the recent success rates (metric levels/cleared).
-    # "cleared_mean": its mean over all iterations so far, which rewards learning fast and steadily.
-    objective: str = "cleared"
     # Stored as mlflow tags of the run, e.g. to group experiments. Set with `+tags.<name>=<value>`.
     tags: dict[str, str] = field(default_factory=dict)
     # Whether to continue an interrupted run with the same config from its last checkpoint, None to ask
@@ -36,6 +32,5 @@ class NeurioConfig:
         assert self.steps_per_iter > 0
         assert self.save_frequency > 0
         assert self.resume_frequency > 0
-        assert self.objective in ("cleared", "cleared_mean")
         if self.test_iter is not None:
             assert self.test_iter >= 0

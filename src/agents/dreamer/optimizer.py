@@ -9,19 +9,19 @@ class LaProp(torch.optim.Optimizer):
     Adam), then momentum on the normalized updates (LaProp, Ziyin et al., 2020), with a linear warmup of the learning
     rate.
 
-    Adaptive gradient clipping (Brock et al., 2021) limits the norm of each parameter's update to `agc` times the norm
-    of the parameter, so that no update changes a layer by much.
+    Adaptive gradient clipping (Brock et al., 2021) limits the norm of each parameter's gradient to `agc` times the
+    norm of the parameter, at least 1e-3.
     """
 
     def __init__(
         self,
         params,
         lr: float,
-        agc: float = 0.3,
+        agc: float,
+        warmup: int,
         beta1: float = 0.9,
         beta2: float = 0.999,
         eps: float = 1e-20,
-        warmup: int = 1000,
     ) -> None:
         super().__init__(params, {"lr": lr, "agc": agc, "beta1": beta1, "beta2": beta2, "eps": eps, "warmup": warmup})
 

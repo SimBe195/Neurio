@@ -5,7 +5,7 @@ import pytest
 from gymnasium.wrappers import GrayscaleObservation
 
 import environment
-from config.levels import CurriculumLevelsConfig, RandomLevelsConfig, SingleLevelConfig
+from config.levels import CurriculumLevelsConfig, SingleLevelConfig
 from environment import (
     ActionRepeatWrapper,
     BaseEnvironment,
@@ -18,7 +18,6 @@ from environment import (
     Powerup,
     ProgressShaping,
     ResizeWrapper,
-    get_base_environment,
     get_env_info,
     get_environment,
     remove_background,
@@ -31,7 +30,7 @@ from fakes import FakeMarioEnv, WarpingMarioEnv, make_env_config
 def fake_base_env(monkeypatch):
     created = []
 
-    def make(config, level="", **_):
+    def make(level="", **_):
         created.append(FakeMarioEnv(level=level or "1-1"))
         return created[-1]
 
@@ -47,21 +46,20 @@ def test_x_distance_takes_the_way_across_the_page_wrap():
     assert x_distance(65535, 0) == 1
 
 
-def test_clip_wrapper_crops_configured_borders():
-    config = make_env_config(clip_top=33, clip_bot=19, clip_left=28, clip_right=4)
+def test_clip_wrapper_cuts_the_top_and_bottom_rows():
+    config = make_env_config(clip_top=33, clip_bot=19)
     env = ClipWrapper(config, FakeMarioEnv())
     obs, _ = env.reset()
 
-    assert obs.shape == env.observation_space.shape == (240 - 33 - 19, 256 - 28 - 4, 3)
-    # Columns encode their original index, so the first remaining column must be clip_left
-    assert obs[0, 0, 0] == 28
-    assert obs[0, -1, 0] == 256 - 4 - 1
+    assert obs.shape == env.observation_space.shape == (240 - 33 - 19, 256, 3)
+    # Columns encode their index: all of them are kept
+    assert obs[0, 0, 0] == 0 and obs[0, -1, 0] == 255
 
 
 @pytest.mark.parametrize("height,width", [(188, 228), (96, 112), (50, 70)])
 def test_resize_wrapper_matches_observation_space(height, width):
     # Non-square input to catch swapped width/height
-    config = make_env_config(clip_top=33, clip_bot=19, clip_left=28, height=height, width=width)
+    config = make_env_config(clip_top=33, clip_bot=19, height=height, width=width)
     env = ResizeWrapper(config, ClipWrapper(config, GrayscaleObservation(FakeMarioEnv(), keep_dim=True)))
     obs, _ = env.reset()
 
@@ -126,9 +124,10 @@ def test_sticky_actions_keep_the_previous_frames_action():
 
 
 def test_flag_reward_replaces_the_games():
-    env = FlagRewardWrapper(make_env_config(flag_reward=500), FakeMarioEnv(rewards=[1.0, 53.0], flag_get=True))
+    env = FlagRewardWrapper(make_env_config(flag_reward=500), FakeMarioEnv(rewards=[-25.0, 53.0], flag_get=True))
     env.reset()
-    assert env.step(0)[1] == 1.0
+    # The game's reward without its clipping to ±15, with the flag's 50 replaced
+    assert env.step(0)[1] == -25.0
     assert env.step(0)[1] == 503.0
 
 
@@ -158,19 +157,6 @@ def test_the_flag_pays_on_top_of_the_progress():
     env = _shaping(FakeMarioEnv(rewards=[0.0] * 2, flag_get=True))
     env.reset()
     assert [env.step(0)[1] for _ in range(2)] == pytest.approx([1.0, 1.0 + 50.0])
-
-
-class FlagpoleMarioEnv(FakeMarioEnv):
-    """Reports the flag from the first step on without ending the episode, like the flagpole slide in the full game."""
-
-    def _info(self, **kwargs) -> dict:
-        return {**super()._info(**kwargs), "flag_get": self.t >= 1}
-
-
-def test_the_flag_pays_once_per_level():
-    env = _shaping(FlagpoleMarioEnv(rewards=[0.0] * 3, truncate=True))
-    env.reset()
-    assert [env.step(0)[1] for _ in range(3)] == pytest.approx([51.0, 1.0, 1.0])
 
 
 @pytest.mark.parametrize("new_level", [False, True])
@@ -244,8 +230,7 @@ OUT_OF_THE_ROOM = [
 
 
 def test_a_pipe_leads_into_another_area_without_a_jump_in_progress():
-    config = make_env_config(complex_movement=True)
-    env = ProgressShaping(config, BaseEnvironment(config, "1-1"))
+    env = ProgressShaping(make_env_config(), BaseEnvironment("1-1"))
     _, start = env.reset()
     steps = [env.step(action) for action, frames in INTO_THE_PIPE + OUT_OF_THE_ROOM for _ in range(frames)]
     infos = [info for *_, info in steps]
@@ -261,7 +246,7 @@ def test_a_pipe_leads_into_another_area_without_a_jump_in_progress():
 
 
 def test_full_wrapper_stack(fake_base_env):
-    config = make_env_config(clip_top=33, clip_bot=19, clip_left=28, height=96, width=112)
+    config = make_env_config(clip_top=33, clip_bot=19, height=96, width=112)
     env = get_environment(config, SingleLevelConfig("1-1"), stack_frames=3)
     obs, _ = env.reset()
     assert obs.shape == env.observation_space.shape == (3, 96, 112, 1)
@@ -271,13 +256,14 @@ def test_full_wrapper_stack(fake_base_env):
     assert info.total_channel_dim == 3
     assert info.num_workers == 1
 
-    terminated = False
+    terminated, rewards = False, []
     while not terminated:
-        obs, _, terminated, _, info = env.step(0)
+        obs, reward, terminated, _, info = env.step(0)
+        rewards.append((reward, info["game_reward"]))
     assert obs.shape == env.observation_space.shape
-    assert info["episode"]["l"] == 5
-    # The game's reward is only scaled
-    assert info["episode"]["r"] == pytest.approx(0.5)
+    # The agent learns from the scaled, shaped reward: 10 pixels per step, and dying after 5 steps. The game's own
+    # reward, here 1 per step, is passed on.
+    assert rewards == pytest.approx([(1.0, 1.0)] * 4 + [(1.0 - 2.5, 1.0)])
 
 
 def test_level_select_env_samples_from_distribution(fake_base_env):
@@ -310,11 +296,10 @@ def test_levels_start_with_powerups_from_their_distribution(fake_base_env):
 
 def test_powerup_in_the_game():
     """In the real game, a power-up lets Mario survive the first Goomba of 1-1 by shrinking."""
-    env = BaseEnvironment(make_env_config(complex_movement=True), level="1-1")
+    env = BaseEnvironment("1-1")
     try:
-        # The frames are views of the emulator's screen, so they are copied
-        small = env.reset()[0].copy()
-        big = env.set_powerup(Powerup.BIG)[0].copy()
+        small = env.reset()[0]
+        big = env.set_powerup(Powerup.BIG)[0]
         env.reset()
         fire, info = env.set_powerup(Powerup.FIRE)
         assert info["powerup_level"] == Powerup.FIRE
@@ -356,11 +341,9 @@ def test_level_select_env_distribution_can_change(fake_base_env):
         env.set_level_distribution(["1-1", "1-2"], [0.5, 0.6])
 
 
-@pytest.mark.parametrize(
-    "levels", [SingleLevelConfig("3-2"), RandomLevelsConfig(["1-1", "1-2"]), CurriculumLevelsConfig()]
-)
-def test_base_environment_plays_the_initial_levels(fake_base_env, levels):
-    env = get_base_environment(make_env_config(), levels)
+@pytest.mark.parametrize("levels", [SingleLevelConfig("3-2"), CurriculumLevelsConfig()])
+def test_environment_plays_the_initial_levels(fake_base_env, levels):
+    env = get_environment(make_env_config(), levels).unwrapped
     assert isinstance(env, LevelSelectEnv)
     assert env.levels == levels.initial_distribution()[0]
 
@@ -398,7 +381,9 @@ def test_human_render_mode_shows_every_frame(fake_base_env, monkeypatch):
     assert len(FakeViewer.instances) == 1
     viewer = FakeViewer.instances[0]
     assert viewer.frames == 1 + 2 * 2
-    assert viewer.size == (720, 768)
+    # The whole frame, scaled
+    height, width = viewer.size
+    assert height * 256 == width * 240
     env.close()
     assert viewer.closed
 
@@ -429,3 +414,10 @@ def test_viewer_paces_frames(monkeypatch):
     assert len(sleeps) == 2
     env.step(0)
     assert sleeps[-1] == pytest.approx(1 / 60)
+
+
+def test_unpatched_emulator_is_rejected(monkeypatch):
+    # An emulator without the layer of each pixel, see patches/nes-py-layer-buffer.patch
+    monkeypatch.setattr(environment.gym_super_mario_bros, "make", lambda *_, **__: FakeMarioEnv())
+    with pytest.raises(AssertionError, match="layer of each pixel"):
+        BaseEnvironment("1-1")

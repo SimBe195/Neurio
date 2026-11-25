@@ -7,18 +7,19 @@ from environment import BASE_HEIGHT, BASE_WIDTH
 
 
 def make_env_config(**overrides) -> EnvironmentConfig:
+    """Full frames, single frames per action and the game's own rewards, unless overridden."""
     values = {
-        "env_name": "SuperMarioBros-v0",
-        "complex_movement": False,
-        "grayscale": True,
         "num_repeat_frames": 1,
+        "sticky_action_probability": 0.0,
         "clip_top": 0,
         "clip_bot": 0,
-        "clip_left": 0,
-        "clip_right": 0,
         "height": BASE_HEIGHT,
         "width": BASE_WIDTH,
         "reward_scale": 0.1,
+        "flag_reward": 50.0,
+        "death_penalty": 25.0,
+        "progress_reward": 1.0,
+        "max_steps_without_progress": 150,
     }
     values.update(overrides)
     return EnvironmentConfig(**values)
@@ -27,7 +28,8 @@ def make_env_config(**overrides) -> EnvironmentConfig:
 class FakeMarioEnv(gymnasium.Env):
     """
     Stand-in for the NES environment. Observations encode the column index, so that orientation of the
-    image can be checked after preprocessing. Episodes follow a scripted list of rewards per step.
+    image can be checked after preprocessing. Episodes follow a scripted list of rewards per step, which are clipped
+    like the game's to ±15.
     """
 
     def __init__(
@@ -55,7 +57,7 @@ class FakeMarioEnv(gymnasium.Env):
         columns = np.arange(BASE_WIDTH, dtype=np.uint8)
         return np.broadcast_to(columns[None, :, None], self.observation_space.shape).copy()
 
-    def _info(self, flag_get: bool = False) -> dict:
+    def _info(self, flag_get: bool = False, reward: float = 0.0) -> dict:
         return {
             "x_pos": 10 * self.t,
             "y_pos": 79,
@@ -67,6 +69,7 @@ class FakeMarioEnv(gymnasium.Env):
             "on_ground": True,
             "powerup_level": self.powerup,
             "reward_components": {"completion": 50.0 if flag_get else 0.0},
+            "reward_total_unclipped": reward,
         }
 
     def render(self):
@@ -90,8 +93,8 @@ class FakeMarioEnv(gymnasium.Env):
         self.t += 1
         finished = self.t == len(self.rewards)
         terminated, truncated = finished and not self.truncate, finished and self.truncate
-        info = self._info(flag_get=terminated and self.flag_get)
-        return self._observation(), reward, terminated, truncated, info
+        info = self._info(flag_get=terminated and self.flag_get, reward=reward)
+        return self._observation(), float(np.clip(reward, -15, 15)), terminated, truncated, info
 
 
 class WarpingMarioEnv(FakeMarioEnv):

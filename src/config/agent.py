@@ -1,7 +1,7 @@
 from dataclasses import dataclass
+from typing import ClassVar
 
-from .learning_rate import LRConfig
-from .model import ImpalaActorCriticConfig, NatureActorCriticConfig
+from .model import ImpalaActorCriticConfig
 
 
 @dataclass
@@ -16,35 +16,31 @@ class AgentConfig:
 
 
 @dataclass
-class RandomAgentConfig(AgentConfig):
-    pass
-
-
-@dataclass
 class PPOAgentConfig(AgentConfig):
-    model: NatureActorCriticConfig | ImpalaActorCriticConfig
-    learning_rate: LRConfig
+    model: ImpalaActorCriticConfig
+    learning_rate: float
     num_stack_frames: int
     gamma: float
-    tau: float
+    # Generalized advantage estimation's lambda
+    lam: float
     epochs_per_update: int
     batch_size: int
     clip_param: float
-    clip_value: bool
     critic_loss_weight: float
     initial_entropy_loss_weight: float
     final_entropy_loss_weight: float
     entropy_decay_updates: int
     grad_clip_norm: float
-    normalize_advantages: bool = True
-    adam_eps: float = 1e-5
+    adam_eps: float
+    # Share of the uniform distribution mixed into the policy, so that no action becomes impossible, as in DreamerV3
+    unimix: float
     # Self-imitation learning: after each update, imitate the agent's own sil_episodes_per_level best episodes per
-    # level where their return beats the current value estimate. A loss weight of 0 disables it.
-    sil_loss_weight: float = 1.0
-    sil_value_loss_weight: float = 0.01
-    sil_episodes_per_level: int = 16
-    sil_updates: int = 8
-    sil_batch_size: int = 256
+    # level where their return beats the current value estimate
+    sil_loss_weight: float
+    sil_value_loss_weight: float
+    sil_episodes_per_level: int
+    sil_updates: int
+    sil_batch_size: int
 
     @property
     def stack_frames(self) -> int:
@@ -52,7 +48,9 @@ class PPOAgentConfig(AgentConfig):
 
     def __post_init__(self) -> None:
         assert 0 <= self.gamma <= 1
-        assert 0 <= self.tau <= 1
+        assert 0 <= self.lam <= 1
+        assert self.learning_rate > 0
+        assert 0 <= self.unimix < 1
         assert self.num_stack_frames >= 1
         assert self.epochs_per_update >= 1
         assert self.batch_size >= 1
@@ -61,7 +59,7 @@ class PPOAgentConfig(AgentConfig):
         assert self.final_entropy_loss_weight >= 0
         assert self.entropy_decay_updates >= 1
         assert self.adam_eps > 0
-        assert self.sil_loss_weight >= 0
+        assert self.sil_loss_weight > 0
         assert self.sil_value_loss_weight >= 0
         assert self.sil_episodes_per_level >= 1
         assert self.sil_updates >= 1
@@ -71,6 +69,22 @@ class PPOAgentConfig(AgentConfig):
 @dataclass
 class DreamerAgentConfig(AgentConfig):
     """DreamerV3 (Hafner et al., 2023), see agents.dreamer and configs/agent/dreamer.yaml."""
+
+    # The losses of agents.dreamer.DreamerAgent, each weighted by loss_scales
+    LOSSES: ClassVar[set[str]] = {
+        "reconstruction",
+        "reward",
+        "continuation",
+        "dynamics",
+        "representation",
+        "policy",
+        "value",
+        "replay_value",
+        "self_imitation",
+        "disagreement",
+        "exploration_value",
+        "cmpo",
+    }
 
     deter: int
     blocks: int
@@ -109,12 +123,11 @@ class DreamerAgentConfig(AgentConfig):
     # Share of the replayed sequences, i.e. the batch without self-imitation, that are sampled around a step picked by
     # how rarely the agent has been there, see StepOutcome.rarity
     rare_fraction: float
-    # Self-imitation: share of each batch from the agent's own best episodes, of which it keeps this many per level.
-    # 0 disables it.
+    # Self-imitation: share of each batch from the agent's own best episodes, of which it keeps this many per level
     sil_fraction: float
     sil_episodes_per_level: int
     # Plan2Explore: ensemble whose disagreement about the next state is rewarded in imagination, weighted against the
-    # game's reward after both are normalized. A weight of 0 disables it.
+    # game's reward after both are normalized
     exploration_heads: int
     exploration_weight: float
 
@@ -131,9 +144,10 @@ class DreamerAgentConfig(AgentConfig):
         assert self.train_ratio > 0
         assert self.replay_size >= self.batch_length
         assert self.imagination_length >= 1
-        assert 0 <= self.unimix < 1
+        assert 0 < self.unimix < 1
+        assert set(self.loss_scales) == self.LOSSES, f"loss_scales must have the scales of {sorted(self.LOSSES)}"
         assert 0 <= self.cmpo_label_smoothing < 1
         assert len(self.return_percentiles) == 2
-        assert 0 <= self.sil_fraction < 1 and self.sil_episodes_per_level >= 1
+        assert 0 < self.sil_fraction < 1 and self.sil_episodes_per_level >= 1
         assert 0 <= self.rare_fraction <= 1
-        assert self.exploration_heads >= 2 and self.exploration_weight >= 0
+        assert self.exploration_heads >= 2 and self.exploration_weight > 0

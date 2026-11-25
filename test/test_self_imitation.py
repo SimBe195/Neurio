@@ -102,10 +102,14 @@ def test_agent_records_its_episodes(sil_agent):
     rng = np.random.default_rng(12)
     for t in range(3):
         sil_agent.act(_random_states(rng))
-        sil_agent.observe(_outcome([1.0, 2.0], [t == 2, False], [False, False], levels=["1-3"] * 2))
-    (episode,) = sil_agent.self_imitation.episodes["1-3"]
-    assert episode.total_reward == 3.0
-    assert len(episode.actions) == 3
+        # Worker 0 started small, worker 1 with the fire flower
+        outcome = _outcome([1.0, 2.0], [t == 2, t == 2], [False, False], levels=["1-3"] * 2, start_powerups=[0, 2])
+        sil_agent.observe(outcome)
+    # Episodes are compared with those of the same level and start power-up
+    (small,) = sil_agent.self_imitation.episodes["1-3 small"]
+    (fire,) = sil_agent.self_imitation.episodes["1-3 fire"]
+    assert small.total_reward == 3.0 and fire.total_reward == 6.0
+    assert len(small.actions) == 3
 
 
 def test_update_imitates_episodes_better_than_expected(sil_agent):
@@ -137,5 +141,27 @@ def test_update_imitates_episodes_better_than_expected(sil_agent):
     assert log_prob(1) == pytest.approx(before, abs=1e-6)
 
 
-def test_disabled_with_zero_weight(monkeypatch):
-    assert _make_agent(monkeypatch, sil_loss_weight=0.0).self_imitation is None
+def test_episodes_are_imitated_for_the_reward_without_the_novelty_bonus(sil_agent):
+    rng = np.random.default_rng(14)
+    for t in range(2):
+        sil_agent.act(_random_states(rng))
+        sil_agent.observe(_outcome([1.5, 1.5], [t == 1, False], [False, False], bonuses=[0.5, 0.5]))
+    (episode,) = sil_agent.self_imitation.episodes["1-1 small"]
+    gamma = sil_agent.config.gamma
+    assert episode.returns.tolist() == pytest.approx([1 + gamma, 1])
+
+
+def test_imitated_returns_are_scaled_like_the_critics(monkeypatch):
+    agent = _make_agent(monkeypatch, sil_loss_weight=1.0, sil_value_loss_weight=1.0, sil_updates=300, sil_batch_size=1)
+    # Returns of the reward the agent learns from vary by 10
+    agent.reward_scale.var = 100.0
+    memory = agent.self_imitation
+    memory._trajectories = memory._trajectories[:1]
+    state = agent._state_to_tensor(_random_states(np.random.default_rng(15)))[:1]
+    memory.record_actions(state, torch.zeros(1, dtype=torch.int64), torch.tensor([1]))
+    memory.record_rewards(torch.tensor([50.0]), [50.0], [True], ["1-1 small"])
+    agent._self_imitation_update()
+    with torch.no_grad():
+        _, value = agent.actor_critic(state, torch.zeros(1, dtype=torch.int64))
+    # The value is raised towards the return of 50 in the critic's scale, 5, not towards 50
+    assert 2.0 < value.item() < 8.0

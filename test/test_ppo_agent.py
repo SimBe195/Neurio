@@ -4,11 +4,10 @@ import numpy as np
 import pytest
 import torch
 
-from agents import PPOAgent, StepOutcome
+from agents import Play, PPOAgent, StepOutcome
 from agents.ppo.advantage import GaeEstimator
 from config.agent import PPOAgentConfig
-from config.learning_rate import ConstantLRConfig
-from config.model import NatureActorCriticConfig
+from config.model import ImpalaActorCriticConfig
 from environment import EnvironmentInfo
 
 ENV_INFO = EnvironmentInfo(width=12, height=10, stack_frames=2, image_channels=1, num_actions=3, num_workers=2)
@@ -20,30 +19,32 @@ def agent(monkeypatch) -> PPOAgent:
 
 
 def _make_agent(monkeypatch, **overrides) -> PPOAgent:
-    # Self-imitation is on by default, the tests enable it where they need it
-    overrides = {"sil_loss_weight": 0.0, **overrides}
     # Also covers construction on machines without a GPU
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     torch.manual_seed(0)
-    config = PPOAgentConfig(
-        model=NatureActorCriticConfig(
-            action_embedding_size=4, num_filters=[4, 4], kernel_sizes=[3, 3], strides=[2, 1], fc_size=8
-        ),
-        learning_rate=ConstantLRConfig(learning_rate=1e-2),
-        num_stack_frames=ENV_INFO.stack_frames,
-        gamma=0.9,
-        tau=0.8,
-        epochs_per_update=2,
-        batch_size=4,
-        clip_param=0.2,
-        clip_value=True,
-        critic_loss_weight=0.5,
-        initial_entropy_loss_weight=0.01,
-        entropy_decay_updates=10,
-        final_entropy_loss_weight=0.001,
-        grad_clip_norm=0.5,
-        **overrides,
-    )
+    values = {
+        "model": ImpalaActorCriticConfig(action_embedding_size=4, channels=[4, 4], blocks_per_stage=1, fc_size=8),
+        "learning_rate": 1e-2,
+        "num_stack_frames": ENV_INFO.stack_frames,
+        "gamma": 0.9,
+        "lam": 0.8,
+        "epochs_per_update": 2,
+        "batch_size": 4,
+        "clip_param": 0.2,
+        "critic_loss_weight": 0.5,
+        "initial_entropy_loss_weight": 0.01,
+        "entropy_decay_updates": 10,
+        "final_entropy_loss_weight": 0.001,
+        "grad_clip_norm": 0.5,
+        "adam_eps": 1e-5,
+        "unimix": 0.01,
+        "sil_loss_weight": 0.7,
+        "sil_value_loss_weight": 0.01,
+        "sil_episodes_per_level": 5,
+        "sil_updates": 8,
+        "sil_batch_size": 16,
+    }
+    config = PPOAgentConfig(**{**values, **overrides})
     return PPOAgent(config, ENV_INFO)
 
 
@@ -52,15 +53,26 @@ def _random_states(rng: np.random.Generator) -> np.ndarray:
     return rng.integers(0, 256, size=shape, dtype=np.uint8)
 
 
-def _outcome(rewards, terminated, truncated, final_observations=None, levels=None, observations=None) -> StepOutcome:
+def _outcome(
+    rewards,
+    terminated,
+    truncated,
+    final_observations=None,
+    levels=None,
+    observations=None,
+    start_powerups=None,
+    bonuses=None,
+) -> StepOutcome:
     return StepOutcome(
         observations if observations is not None else _random_states(np.random.default_rng()),
         np.asarray(rewards),
         np.asarray(terminated),
         np.asarray(truncated),
         levels or ["1-1"] * len(rewards),
-        final_observations,
         game_rewards=np.asarray(rewards, dtype=float),
+        start_powerups=np.zeros(len(rewards), int) if start_powerups is None else np.asarray(start_powerups),
+        final_observations=final_observations,
+        bonuses=None if bonuses is None else np.asarray(bonuses, float),
     )
 
 
@@ -171,7 +183,7 @@ def test_greedy_actions_are_most_likely_and_not_learned_from(agent):
     states = _random_states(np.random.default_rng(5))
     with torch.no_grad():
         logits, _ = agent.actor_critic(agent._state_to_tensor(states), agent.prev_actions)
-    assert agent.act(states, greedy=True) == logits.argmax(-1).tolist()
+    assert agent.act(states, Play.GREEDY) == logits.argmax(-1).tolist()
     agent.observe(_outcome([1.0, 2.0], [False, False], [False, False]))
     assert len(agent.experience_buffer) == 0
 
@@ -191,17 +203,15 @@ def test_entropy_weight_schedule(agent):
     assert all(a >= b for a, b in itertools.pairwise(weights))
 
 
-@pytest.mark.parametrize("normalize", [True, False])
-def test_advantage_normalization(agent, normalize):
-    agent.config.normalize_advantages = normalize
+def test_advantage_normalization(agent):
     logits = torch.zeros(4, ENV_INFO.num_actions)
     actions = torch.zeros(4, dtype=torch.int64)
     old_log_probs = torch.full((4,), -float(np.log(ENV_INFO.num_actions)))
     advantages = torch.tensor([1.0, 2.0, 3.0, 4.0]) * 100
 
-    # With ratio 1, the actor loss is the negative mean advantage
+    # With ratio 1, the actor loss is the negative mean of the normalized advantages, without the normalization -250
     loss, _ = agent._actor_loss(logits, actions, old_log_probs, advantages)
-    assert loss.item() == pytest.approx(0.0 if normalize else -250.0, abs=1e-5)
+    assert loss.item() == pytest.approx(0.0, abs=1e-5)
 
 
 def test_network_sees_the_previous_action_of_the_episode(agent):
@@ -214,3 +224,74 @@ def test_network_sees_the_previous_action_of_the_episode(agent):
 
     assert agent.experience_buffer.stack("prev_actions").tolist() == [[0, 0], [0, first[1]]]
     assert agent.experience_buffer.stack("actions").tolist() == [first, second]
+
+
+def test_reset_starts_new_episodes(agent):
+    rng = np.random.default_rng(8)
+    first = agent.act(_random_states(rng))
+    assert any(first)
+    agent.observe(_outcome([0.0, 0.0], [False, False], [False, False]))
+    agent.reset()
+    agent.act(_random_states(rng))
+    agent.observe(_outcome([0.0, 0.0], [False, False], [False, False]))
+
+    assert agent.experience_buffer.stack("prev_actions").tolist() == [[0, 0], [0, 0]]
+
+
+def test_sampled_actions_are_not_learned_from(agent):
+    rng = np.random.default_rng(6)
+    actions = set()
+    for _ in range(10):
+        actions.update(agent.act(_random_states(rng), Play.SAMPLE))
+        agent.observe(_outcome([1.0, 2.0], [False, False], [False, False]))
+    assert len(actions) > 1
+    assert len(agent.experience_buffer) == 0
+
+
+def test_untried_actions_are_taken_first(agent):
+    # Worker 0 has not tried action 1 yet, worker 1 has tried all
+    untried = np.array([[False, True, False], [False, False, False]])
+    rng = np.random.default_rng(3)
+    for _ in range(10):
+        assert agent.act(_random_states(rng), untried=untried)[0] == 1
+        agent.observe(_outcome([0.0, 0.0], [False, False], [False, False]))
+    # It learns from the action it took, with the probability its policy gives it
+    assert agent.experience_buffer.stack("actions")[:, 0].tolist() == [1] * 10
+    states = agent.experience_buffer.stack("states")[-1]
+    with torch.no_grad():
+        logits, _ = agent.actor_critic(states, agent.experience_buffer.stack("prev_actions")[-1])
+    expected = agent._policy(logits).log_prob(torch.tensor([1, 0]))[0]
+    assert agent.experience_buffer.stack("log_probs")[-1, 0] == pytest.approx(expected.item())
+
+
+def test_every_action_stays_possible(monkeypatch):
+    agent = _make_agent(monkeypatch, unimix=0.3)
+    # The network rules out all but action 0
+    with torch.no_grad():
+        agent.actor_critic.actor_layer.bias[:] = torch.tensor([60.0, 0.0, 0.0])
+    rng = np.random.default_rng(4)
+    actions = [action for _ in range(100) for action in agent.act(_random_states(rng))]
+    # Each action keeps a probability of at least 0.3 / 3
+    assert {1, 2} <= set(actions)
+    assert agent.experience_buffer.stack("log_probs").min() >= np.log(0.3 / 3) - 1e-6
+
+
+def test_policy_gradient_starts_from_the_policy_that_acted(monkeypatch):
+    agent = _make_agent(monkeypatch, unimix=0.3)
+    with torch.no_grad():
+        agent.actor_critic.actor_layer.bias[:] = torch.tensor([60.0, 0.0, 0.0])
+    rng = np.random.default_rng(5)
+    for _ in range(20):
+        agent.act(_random_states(rng))
+        agent.observe(_outcome([0.0, 0.0], [False, False], [False, False]))
+    buffer = agent.experience_buffer
+    states, prev_actions = buffer.stack("states").flatten(0, 1), buffer.stack("prev_actions").flatten(0, 1)
+    actions, log_probs = buffer.stack("actions").flatten(0, 1), buffer.stack("log_probs").flatten(0, 1)
+    assert actions.ne(0).any()
+    with torch.no_grad():
+        logits, _ = agent.actor_critic(states, prev_actions)
+    advantages = torch.randn(len(actions), generator=torch.Generator().manual_seed(0))
+    # Before any update the probability ratios are 1, also of the actions that only the uniform mixture took, so the
+    # loss is minus the mean of the normalized advantages
+    loss, _ = agent._actor_loss(logits, actions, log_probs, advantages)
+    assert loss.item() == pytest.approx(0.0, abs=1e-5)

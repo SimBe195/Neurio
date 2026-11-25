@@ -5,7 +5,6 @@ description = "Training a super-mario-bros AI using reinforcement learning"
 authors = [{ name = "Simon Berger" }]
 requires-python = ">=3.13"
 dependencies = [
-    "beartype>=0.22.9",
     "gym-super-mario-bros>=9.1.0",
     "gymnasium>=1.3.0",
     "hydra-core>=1.3.7",
@@ -16,7 +15,6 @@ dependencies = [
     "numpy>=2.5.3",
     "omegaconf>=2.3.1",
     "opencv-python>=5.0.0.93",
-    "optuna>=5.0.0",
     "pandas>=3.0.6",
     "torch>=2.14.1",
     "torchinfo>=1.8.0",
@@ -28,6 +26,8 @@ Repository = "https://github.com/SimBe195/2022-09-01_neurio"
 
 [dependency-groups]
 dev = [
+    # Runtime checks of the jaxtyping annotations in the tests, see test/conftest.py
+    "beartype>=0.22.9",
     "pytest>=9.1.1",
     "ruff>=0.16.10",
     "ty>=0.0.84",
@@ -37,13 +37,14 @@ dev = [
 package = false
 
 [tool.uv.sources]
-# Fork that tells for each screen pixel whether it shows the backdrop, the background or a sprite
+# Upstream with patches/nes-py-layer-buffer.patch applied, which tells for each screen pixel whether it shows the
+# backdrop, the background or a sprite
 nes-py = { path = "external/nes-py" }
 
 [tool.ruff]
 line-length = 120
 target-version = "py313"
-src = ["src", "test", "scripts"]
+src = ["src", "test"]
 extend-exclude = ["external"]
 
 [tool.ruff.lint]
@@ -65,4 +66,4 @@ filterwarnings = [
 
 [tool.ty.src]
 # Tests are typed loosely on purpose
-include = ["src", "scripts"]
+include = ["src"]

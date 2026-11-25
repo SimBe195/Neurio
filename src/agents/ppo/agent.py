@@ -1,10 +1,9 @@
 import numpy as np
 import torch
 import torchinfo
-from jaxtyping import Float, Int64, Shaped
-from torch.utils.data import DataLoader, TensorDataset
+from jaxtyping import Float, Int64
 
-from agents.agent import Agent, StepOutcome, get_device
+from agents.agent import Agent, Play, StepOutcome, get_device
 from config.agent import PPOAgentConfig
 from environment import EnvironmentInfo
 
@@ -20,31 +19,27 @@ class PPOAgent(Agent):
     Proximal policy optimization (Schulman et al., 2017) with generalized advantage estimation, self-imitation of the
     agent's own best episodes and rewards scaled by the spread of the return. Each update learns from the steps since
     the previous one.
+
+    Untried actions (see Agent.act) are off-policy for PPO: it learns from them with its policy's probability of them,
+    which its clipping bounds. They are rare, and self-imitation learns from them without that restriction.
     """
 
     config: PPOAgentConfig
-    # It learns on-policy, from the probabilities of its own choices
-    takes_untried_actions = False
 
     def __init__(self, config: PPOAgentConfig, env_info: EnvironmentInfo) -> None:
         super().__init__(config, env_info)
         self.device = get_device()
-        self.gae_estimator = GaeEstimator(gamma=config.gamma, tau=config.tau)
-        self.self_imitation = (
-            SelfImitationMemory(self.num_workers, config.gamma, config.sil_episodes_per_level, env_info.stack_frames)
-            if config.sil_loss_weight > 0
-            else None
+        self.gae_estimator = GaeEstimator(gamma=config.gamma, lam=config.lam)
+        self.self_imitation = SelfImitationMemory(
+            self.num_workers, config.gamma, config.sil_episodes_per_level, env_info.stack_frames
         )
         self.reward_scale = RewardScale(self.num_workers, config.gamma, self.device)
         self.experience_buffer = ExperienceBuffer()
         self.actor_critic = ActorCritic(config.model, env_info).to(self.device)
-        self.opt = torch.optim.Adam(
-            self.actor_critic.parameters(), lr=config.learning_rate.learning_rate, eps=config.adam_eps
-        )
-        self.scheduler = config.learning_rate.create_scheduler(self.opt)
+        self.opt = torch.optim.Adam(self.actor_critic.parameters(), lr=config.learning_rate, eps=config.adam_eps)
         self.update_step = 0
 
-        # The network sees the previous action of each worker, none at the start of an episode
+        # The network sees the previous action of each worker, action 0 (no buttons) at the start of an episode
         self.prev_actions = torch.zeros(self.num_workers, dtype=torch.int64, device=self.device)
         # States after the last observed step, from which the returns of the buffered steps are bootstrapped
         self.next_states: Float[torch.Tensor, "worker channel height width"] | None = None
@@ -58,19 +53,16 @@ class PPOAgent(Agent):
         return {
             "actor_critic": self.actor_critic.state_dict(),
             "optimizer": self.opt.state_dict(),
-            "scheduler": self.scheduler.state_dict(),
             "update_step": self.update_step,
-            "self_imitation": self.self_imitation.state_dict() if self.self_imitation is not None else {},
+            "self_imitation": self.self_imitation.state_dict(),
             "reward_scale": self.reward_scale.state_dict(),
         }
 
     def load_state_dict(self, state: dict) -> None:
         self.actor_critic.load_state_dict(state["actor_critic"])
         self.opt.load_state_dict(state["optimizer"])
-        self.scheduler.load_state_dict(state["scheduler"])
         self.update_step = state["update_step"]
-        if self.self_imitation is not None:
-            self.self_imitation.load_state_dict(state["self_imitation"])
+        self.self_imitation.load_state_dict(state["self_imitation"])
         self.reward_scale.load_state_dict(state["reward_scale"])
 
     def describe(self) -> str:
@@ -86,16 +78,33 @@ class PPOAgent(Agent):
             )
         )
 
-    def act(self, observations: np.ndarray, greedy: bool = False, untried: np.ndarray | None = None) -> list[int]:
-        assert untried is None, "PPO learns on-policy, from its own actions only"
+    def _policy_probs(self, logits: Float[torch.Tensor, "*batch action"]) -> Float[torch.Tensor, "*batch action"]:
+        """The policy, mixed with the uniform distribution so that no action becomes impossible."""
+        probs = torch.softmax(logits, -1)
+        return (1 - self.config.unimix) * probs + self.config.unimix / probs.shape[-1]
+
+    def _policy(self, logits: Float[torch.Tensor, "*batch action"]) -> torch.distributions.Categorical:
+        return torch.distributions.Categorical(probs=self._policy_probs(logits))
+
+    def act(self, observations: np.ndarray, play: Play = Play.TRAIN, untried: np.ndarray | None = None) -> list[int]:
         states = self._state_to_tensor(observations)
         with torch.no_grad():
             logits, values = self.actor_critic(states, self.prev_actions)
-        if greedy:
-            actions = logits.argmax(-1)
-        else:
-            distribution = torch.distributions.Categorical(logits=logits.float())
-            actions = distribution.sample()
+        self._recording = play is Play.TRAIN
+        if play is Play.GREEDY:
+            self.prev_actions = logits.argmax(-1)
+            return self.prev_actions.tolist()
+        probs = self._policy_probs(logits)
+        distribution = torch.distributions.Categorical(probs=probs)
+        actions = distribution.sample()
+        if self._recording:
+            if untried is not None and untried.any():
+                # The untried action by the policy, which only matters for its order: all are tried in turn
+                mask = torch.as_tensor(untried, device=self.device)
+                has_untried = mask.any(-1, keepdim=True)
+                untried_probs = probs.masked_fill(has_untried & ~mask, 0.0)
+                untried_actions = torch.distributions.Categorical(probs=untried_probs).sample()
+                actions = torch.where(has_untried.squeeze(-1), untried_actions, actions)
             self.experience_buffer.add(
                 states=states,
                 prev_actions=self.prev_actions,
@@ -103,9 +112,7 @@ class PPOAgent(Agent):
                 log_probs=distribution.log_prob(actions),
                 values=values,
             )
-            if self.self_imitation is not None:
-                self.self_imitation.record_actions(states, self.prev_actions, actions)
-        self._recording = not greedy
+            self.self_imitation.record_actions(states, self.prev_actions, actions)
         self.prev_actions = actions
         return actions.tolist()
 
@@ -115,13 +122,15 @@ class PPOAgent(Agent):
             self._record_outcome(outcome, dones)
         self.prev_actions = self.prev_actions * ~dones
 
+    def reset(self) -> None:
+        self.prev_actions.zero_()
+
     def _record_outcome(self, outcome: StepOutcome, dones: torch.Tensor) -> None:
         rewards = torch.tensor(outcome.rewards, dtype=torch.float32, device=self.device)
-        if self.self_imitation is not None:
-            assert outcome.game_rewards is not None
-            self.self_imitation.record_rewards(
-                rewards, outcome.game_rewards.tolist(), outcome.dones.tolist(), outcome.levels
-            )
+        # The episodes are imitated for the task's reward, without the novelty bonus, which wears off
+        task_rewards = torch.tensor(outcome.task_rewards, dtype=torch.float32, device=self.device)
+        game_rewards = outcome.game_rewards.tolist()
+        self.self_imitation.record_rewards(task_rewards, game_rewards, outcome.dones.tolist(), outcome.episode_groups)
         rewards = self.reward_scale(rewards, dones)
 
         # A truncated episode did not end in the game, so its return continues beyond the final observation.
@@ -144,12 +153,15 @@ class PPOAgent(Agent):
     def update(self) -> dict[str, float]:
         assert self.next_states is not None and len(self.experience_buffer) > 0, "No experience to learn from."
         entropies = []
-        dataloader = DataLoader(self._create_dataset(), batch_size=self.config.batch_size, shuffle=True)
+        steps = self._steps()
+        num_steps = len(steps[0])
         for _ in range(self.config.epochs_per_update):
-            for states, log_probs, values, actions, prev_actions, advantages, returns in dataloader:
+            order = torch.randperm(num_steps, device=self.device)
+            for indices in order.split(self.config.batch_size):
+                states, log_probs, actions, prev_actions, advantages, returns = (tensor[indices] for tensor in steps)
                 logits, new_values = self.actor_critic(states, prev_actions)
                 actor_loss, distribution = self._actor_loss(logits, actions, log_probs, advantages)
-                critic_loss = self._critic_loss(new_values, returns, values)
+                critic_loss = 0.5 * (returns - new_values).square().mean()
                 entropy = distribution.entropy().mean()
                 loss = (
                     actor_loss
@@ -159,14 +171,12 @@ class PPOAgent(Agent):
                 self._optimizer_step(loss)
                 entropies.append(entropy.detach())
         self.experience_buffer.clear()
-
-        if self.self_imitation is not None:
-            self._self_imitation_update()
-        self.scheduler.step()
+        self._self_imitation_update()
         self.update_step += 1
         return {"behavior/entropy": torch.stack(entropies).mean().item()}
 
-    def _create_dataset(self) -> TensorDataset:
+    def _steps(self) -> list[torch.Tensor]:
+        """:return: The states, log-probabilities, actions, previous actions, advantages and returns of all steps"""
         buffer = self.experience_buffer
         assert self.next_states is not None
         with torch.no_grad():
@@ -177,15 +187,12 @@ class PPOAgent(Agent):
             torch.concat([buffer.stack("values"), next_values.unsqueeze(0)]),
             buffer.stack("dones"),
         )
-        tensors = [buffer.stack(name) for name in ("states", "log_probs", "values", "actions", "prev_actions")] + [
+        tensors = [buffer.stack(name) for name in ("states", "log_probs", "actions", "prev_actions")] + [
             advantages,
             returns,
         ]
-        return TensorDataset(*(self._flatten_steps(tensor) for tensor in tensors))
-
-    @staticmethod
-    def _flatten_steps(tensor: Shaped[torch.Tensor, "step worker *rest"]) -> Shaped[torch.Tensor, " batch *rest"]:
-        return tensor.flatten(0, 1)
+        # The steps of all workers
+        return [tensor.flatten(0, 1) for tensor in tensors]
 
     def _actor_loss(
         self,
@@ -194,25 +201,13 @@ class PPOAgent(Agent):
         old_log_probs: Float[torch.Tensor, " minibatch"],
         advantages: Float[torch.Tensor, " minibatch"],
     ) -> tuple[Float[torch.Tensor, ""], torch.distributions.Categorical]:
-        distribution = torch.distributions.Categorical(logits=logits)
-        if self.config.normalize_advantages and advantages.numel() > 1:
+        distribution = self._policy(logits)
+        if advantages.numel() > 1:
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         ratio = torch.exp(distribution.log_prob(actions) - old_log_probs)
         clip = self.config.clip_param
         loss = -torch.minimum(advantages * ratio, advantages * torch.clip(ratio, 1 - clip, 1 + clip)).mean()
         return loss, distribution
-
-    def _critic_loss(
-        self,
-        values: Float[torch.Tensor, " minibatch"],
-        returns: Float[torch.Tensor, " minibatch"],
-        old_values: Float[torch.Tensor, " minibatch"],
-    ) -> Float[torch.Tensor, ""]:
-        loss = 0.5 * (returns - values) ** 2
-        if self.config.clip_value:
-            clipped = old_values + torch.clip(values - old_values, -self.config.clip_param, self.config.clip_param)
-            loss = torch.maximum(loss, 0.5 * (returns - clipped) ** 2)
-        return loss.mean()
 
     def _optimizer_step(self, loss: Float[torch.Tensor, ""]) -> None:
         self.opt.zero_grad()
@@ -231,20 +226,19 @@ class PPOAgent(Agent):
         Imitate the stored best episodes where their return exceeds the current value estimate, weighted by how much
         it does, and raise the value estimate towards that return.
         """
-        assert self.self_imitation is not None
         for _ in range(self.config.sil_updates):
             batch = self.self_imitation.sample(self.config.sil_batch_size)
             if batch is None:
                 break
             states, prev_actions, actions, returns = (tensor.to(self.device) for tensor in batch)
-            # The memory keeps the game's returns, the critic learns them scaled
+            # The memory keeps unscaled returns of the reward without the novelty bonus, the critic learns scaled ones
             returns = returns / self.reward_scale.std
             logits, values = self.actor_critic(states.to(torch.float32), prev_actions)
             advantages = torch.clamp(returns - values, min=0)
             weights = advantages.detach()
             if weights.sum() <= 0:
                 continue
-            log_probs = torch.log_softmax(logits, dim=-1).gather(-1, actions.unsqueeze(-1)).squeeze(-1)
+            log_probs = self._policy(logits).log_prob(actions)
             policy_loss = -(weights * log_probs).sum() / weights.sum()
             value_loss = 0.5 * torch.mean(advantages**2)
             loss = self.config.sil_loss_weight * policy_loss + self.config.sil_value_loss_weight * value_loss

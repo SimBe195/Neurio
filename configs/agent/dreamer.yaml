@@ -1,5 +1,6 @@
-# DreamerV3 (Hafner et al., 2023) with the paper's settings. The network sizes are those of its 12M parameter model;
-# its larger ones scale deter, hidden, classes, depth and units together, e.g. 25M: agent.deter=3072 agent.hidden=384
+# DreamerV3 (Hafner et al., 2023) with the paper's network and training settings, plus Muesli's CMPO regularizer,
+# self-imitation, replay of rare steps and Plan2Explore. The network sizes are those of its 12M parameter model; its
+# larger ones scale deter, hidden, classes, depth and units together, e.g. 25M: agent.deter=3072 agent.hidden=384
 # agent.classes=24 agent.depth=24 agent.units=384
 _target_: config.agent.DreamerAgentConfig
 
@@ -39,14 +40,15 @@ loss_scales:
   exploration_value: 1.0
   # Muesli's CMPO regularizer of the actor towards the actions that one imagined step shows to be better
   cmpo: 1.0
-# Training: sequences of batch_length steps from a replay of the last replay_size steps (about 10 GB at the default
-# frame size), with as many updates that each step is replayed train_ratio times on average
+# Training: sequences of batch_length steps from a replay of the last replay_size steps (about 7 GB at the default
+# frame size, with the model state of each step), with as many updates that each step is replayed train_ratio times
+# on average
 batch_size: 16
 batch_length: 64
 train_ratio: 32
 replay_size: 1000000
 learning_rate: 4.0e-5
-# Adaptive gradient clipping: no update changes a parameter by more than this fraction of its norm
+# Adaptive gradient clipping: each parameter's gradient norm is limited to this fraction of the parameter's norm
 agc: 0.3
 warmup: 1000
 # Imagination: rollouts of this many steps from every replayed state, with returns over about horizon steps

@@ -21,9 +21,9 @@ class Episode:
 class SelfImitationMemory:
     """
     Memory of the agent's own best episodes for self-imitation learning (Oh et al., 2018): it records the episode of
-    each worker and keeps the `episodes_per_level` episodes with the highest game reward of every level, with the
-    discounted return of each step of the reward the agent learns from. Levels are kept apart since their rewards are
-    not comparable.
+    each worker and keeps the `episodes_per_level` episodes with the highest game reward of every level and start
+    power-up, with the discounted return of each step of the reward the agent learns from. They are kept apart since
+    their rewards are not comparable.
 
     Episodes are kept in CPU memory. States are stacks of the last `stack_frames` frames, so consecutive states share
     all but one frame, and each frame is stored only once.
@@ -34,7 +34,7 @@ class SelfImitationMemory:
         self.episodes_per_level = episodes_per_level
         self.stack_frames = stack_frames
         self._trajectories: list[dict[str, list]] = [self._empty_trajectory() for _ in range(num_workers)]
-        # Keyed by level
+        # Keyed by level and start power-up, see StepOutcome.episode_groups
         self.episodes: dict[str, list[Episode]] = {}
         self._stored: list[Episode] | None = None
         self._cumulative_lengths: list[int] = []
@@ -66,19 +66,19 @@ class SelfImitationMemory:
         rewards: Float[torch.Tensor, " worker"],
         game_rewards: list[float],
         dones: list[bool],
-        levels: list[str],
+        groups: list[str],
     ) -> None:
         """
         :param rewards: The reward the agent learns from of the last actions
         :param game_rewards: The game's reward of the last actions, by which episodes are ranked
         :param dones: Whether the episode of each worker ended with the last actions
-        :param levels: Level of each worker, for finished episodes the level they ended on
+        :param groups: Per worker, the episodes its episode is compared with, see StepOutcome.episode_groups
         """
         for worker, (trajectory, reward) in enumerate(zip(self._trajectories, rewards.tolist(), strict=True)):
             trajectory["rewards"].append(reward)
             trajectory["game_rewards"].append(game_rewards[worker])
             if dones[worker]:
-                self._store(trajectory, levels[worker])
+                self._store(trajectory, groups[worker])
                 self._trajectories[worker] = self._empty_trajectory()
 
     def _store(self, trajectory: dict[str, list], key: str) -> None:

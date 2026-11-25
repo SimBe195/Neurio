@@ -1,5 +1,0 @@
-_target_: config.learning_rate.LinearDecayLRConfig
-
-learning_rate: 0.00045
-# Decay over the whole training
-decay_iters: ${num_iters}
